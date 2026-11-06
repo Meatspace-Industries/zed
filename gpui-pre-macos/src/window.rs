@@ -3594,8 +3594,11 @@ extern "C" fn attributed_substring_for_proposed_range(
         let mut adjusted: Option<Range<usize>> = None;
 
         let selected_text = input_handler.text_for_range(range.clone(), &mut adjusted)?;
+        // `actualRange` is optional: AppKit and input methods pass NULL when they do not
+        // want the adjusted range.
         if let Some(adjusted) = adjusted
             && adjusted != range
+            && !actual_range.is_null()
         {
             unsafe { actual_range.write(NSRange::from(adjusted)) };
         }
