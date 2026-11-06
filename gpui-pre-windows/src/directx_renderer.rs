@@ -409,7 +409,7 @@ impl DirectXRenderer {
     /// goes through MetalRenderer; this is the Windows analogue). Draws into
     /// the existing render target, copies it into a `D3D11_USAGE_STAGING`
     /// texture, maps it, and converts BGRA to RGBA.
-    #[cfg(feature = "test-support")]
+    #[cfg(any(feature = "test-support", feature = "devtools"))]
     pub(crate) fn render_to_image(
         &mut self,
         scene: &Scene,

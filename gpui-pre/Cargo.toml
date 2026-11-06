@@ -63,6 +63,7 @@ default = [
     "x11",
     "windows-manifest",
 ]
+devtools = []
 font-kit = []
 hot-reload = [
     "dep:async-tungstenite",
