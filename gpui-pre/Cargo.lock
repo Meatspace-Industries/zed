@@ -1534,6 +1534,7 @@ dependencies = [
  "taffy",
  "thiserror 2.0.17",
  "ttf-parser",
+ "unicode-bidi",
  "unicode-segmentation",
  "url",
  "usvg",

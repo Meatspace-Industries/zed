@@ -1,4 +1,7 @@
-use crate::{FontId, GlyphId, Pixels, PlatformTextSystem, Point, SharedString, Size, point, px};
+use crate::{
+    Bounds, FontId, GlyphId, Pixels, PlatformTextSystem, Point, SharedString, Size, point, px,
+    size,
+};
 use collections::{FxHashMap, FxHashSet};
 use itertools::Itertools;
 use smallvec::SmallVec;
@@ -13,7 +16,7 @@ use std::{
     },
 };
 
-use super::LineWrapper;
+use super::{LineWrapper, bidi};
 
 /// A laid out and styled line of text
 #[derive(Default, Debug)]
@@ -39,6 +42,10 @@ pub struct ShapedRun {
     pub font_id: FontId,
     /// The glyphs that make up this run
     pub glyphs: Vec<ShapedGlyph>,
+    /// Whether the run reads right to left (an odd UAX #9 embedding level). Its glyphs are in
+    /// visual order, so their indices decrease. GPUI sets it after shaping; a platform text
+    /// system leaves it false.
+    pub is_rtl: bool,
 }
 
 /// A single glyph, ready to paint.
@@ -74,9 +81,25 @@ impl LineLayout {
         }
     }
 
+    /// Whether a run reads right to left. Only such a line takes the bidi paths below.
+    pub fn has_rtl(&self) -> bool {
+        self.runs.iter().any(|run| run.is_rtl)
+    }
+
+    /// The visual x-spans that a byte range covers. A range across a change of direction is
+    /// several spans.
+    pub fn selection_spans(&self, range: Range<usize>) -> SmallVec<[Range<Pixels>; 2]> {
+        let edges = bidi::edges(self, (0, 0), None, self.width);
+        bidi::selection_spans(&edges, &range)
+    }
+
     /// closest_index_for_x returns the character boundary closest to the given x coordinate
     /// (e.g. to handle aligning up/down arrow keys)
     pub fn closest_index_for_x(&self, x: Pixels) -> usize {
+        if self.has_rtl() {
+            let edges = bidi::edges(self, (0, 0), None, self.width);
+            return bidi::closest_index(&edges, x, &(0..self.len));
+        }
         let mut prev_index = 0;
         let mut prev_x = px(0.);
 
@@ -105,8 +128,13 @@ impl LineLayout {
         self.len
     }
 
-    /// The x position of the character at the given index
+    /// The x position of the character at the given index: the caret before it, which is the
+    /// right edge of a right-to-left character.
     pub fn x_for_index(&self, index: usize) -> Pixels {
+        if self.has_rtl() {
+            let edges = bidi::edges(self, (0, 0), None, self.width);
+            return bidi::caret_x(&edges, index, &(0..self.len));
+        }
         for run in &self.runs {
             for glyph in &run.glyphs {
                 if glyph.index >= index {
@@ -150,6 +178,7 @@ impl LineLayout {
                 left_runs.push(ShapedRun {
                     font_id: run.font_id,
                     glyphs: run.glyphs[..split_pos].to_vec(),
+                    is_rtl: run.is_rtl,
                 });
             }
 
@@ -166,6 +195,7 @@ impl LineLayout {
                 right_runs.push(ShapedRun {
                     font_id: run.font_id,
                     glyphs: right_glyphs,
+                    is_rtl: run.is_rtl,
                 });
             }
         }
@@ -303,6 +333,12 @@ pub struct WrappedLineLayout {
 
     /// The width of the line, if it was wrapped
     pub wrap_width: Option<Pixels>,
+
+    /// For text with right-to-left characters, the byte index that starts each visual line, top
+    /// to bottom. Such a line was broken in logical order and shaped on its own, so a line's
+    /// glyphs follow one another in the unwrapped layout but their indices are not in order.
+    /// Empty for other text.
+    pub(crate) line_starts: SmallVec<[usize; 1]>,
 }
 
 /// A boundary at which a line was wrapped
@@ -362,6 +398,99 @@ impl WrappedLineLayout {
         &self.unwrapped_layout.runs
     }
 
+    /// The byte range of each visual line, top to bottom.
+    pub fn line_ranges(&self) -> SmallVec<[Range<usize>; 1]> {
+        let starts: SmallVec<[usize; 4]> = if self.line_starts.is_empty() {
+            std::iter::once(0)
+                .chain(self.wrap_boundaries.iter().map(|boundary| {
+                    self.unwrapped_layout.runs[boundary.run_ix].glyphs[boundary.glyph_ix].index
+                }))
+                .collect()
+        } else {
+            self.line_starts.iter().copied().collect()
+        };
+        starts
+            .iter()
+            .enumerate()
+            .map(|(line, start)| *start..starts.get(line + 1).copied().unwrap_or(self.len()))
+            .collect()
+    }
+
+    /// The visual x-spans, with each line's row, that a byte range covers: the selection
+    /// highlight. Spans are relative to the line's own start, as glyphs paint.
+    pub fn selection_spans(
+        &self,
+        range: Range<usize>,
+        line_height: Pixels,
+    ) -> SmallVec<[Bounds<Pixels>; 2]> {
+        let mut spans = SmallVec::new();
+        for (line, bytes) in self.line_ranges().into_iter().enumerate() {
+            let overlap = range.start.max(bytes.start)..range.end.min(bytes.end);
+            if overlap.start >= overlap.end {
+                continue;
+            }
+            let (edges, start_x) = self.line_edges(line);
+            for span in bidi::selection_spans(&edges, &overlap) {
+                spans.push(Bounds::new(
+                    point(span.start - start_x, line_height * line as f32),
+                    size(span.end - span.start, line_height),
+                ));
+            }
+        }
+        spans
+    }
+
+    /// The glyph extents of one visual line and the x where that line starts.
+    fn line_edges(&self, line: usize) -> (Vec<bidi::Edge>, Pixels) {
+        let layout = &self.unwrapped_layout;
+        let glyph_x = |boundary: &WrapBoundary| {
+            layout.runs[boundary.run_ix].glyphs[boundary.glyph_ix]
+                .position
+                .x
+        };
+        let start = line
+            .checked_sub(1)
+            .and_then(|previous| self.wrap_boundaries.get(previous));
+        let end = self.wrap_boundaries.get(line);
+        let start_x = start.map_or(px(0.), glyph_x);
+        let end_x = end.map_or(layout.width, glyph_x);
+        let edges = bidi::edges(
+            layout,
+            start.map_or((0, 0), |boundary| (boundary.run_ix, boundary.glyph_ix)),
+            end.map(|boundary| (boundary.run_ix, boundary.glyph_ix)),
+            end_x,
+        );
+        (edges, start_x)
+    }
+
+    /// Hit testing and carets for text laid out by line in logical order.
+    fn bidi_index_for_position(
+        &self,
+        position: Point<Pixels>,
+        line_height: Pixels,
+        closest: bool,
+    ) -> Result<usize, usize> {
+        let line = (position.y / line_height) as usize;
+        let lines = self.line_ranges();
+        let Some(bytes) = lines.get(line) else {
+            return Err(0);
+        };
+        let (edges, start_x) = self.line_edges(line);
+        let x = position.x + start_x;
+        let inside = edges
+            .first()
+            .zip(edges.last())
+            .is_some_and(|(first, last)| first.left <= x && x < last.right);
+        if !inside {
+            return Err(bidi::closest_index(&edges, x, bytes));
+        }
+        if closest {
+            Ok(bidi::closest_index(&edges, x, bytes))
+        } else {
+            bidi::index_at(&edges, x).ok_or(bytes.end)
+        }
+    }
+
     /// The index corresponding to a given position in this layout for the given line height.
     ///
     /// See also [`Self::closest_index_for_position`].
@@ -392,6 +521,9 @@ impl WrappedLineLayout {
         line_height: Pixels,
         closest: bool,
     ) -> Result<usize, usize> {
+        if !self.line_starts.is_empty() {
+            return self.bidi_index_for_position(position, line_height, closest);
+        }
         let wrapped_line_ix = (position.y / line_height) as usize;
 
         let wrapped_line_start_index;
@@ -444,8 +576,19 @@ impl WrappedLineLayout {
         }
     }
 
-    /// Returns the pixel position for the given byte index.
+    /// Returns the pixel position for the given byte index: the caret before that character,
+    /// which is its right edge when it reads right to left.
     pub fn position_for_index(&self, index: usize, line_height: Pixels) -> Option<Point<Pixels>> {
+        if !self.line_starts.is_empty() {
+            let lines = self.line_ranges();
+            let line = lines.iter().position(|bytes| index <= bytes.end)?;
+            if index < lines[line].start {
+                return None;
+            }
+            let (edges, start_x) = self.line_edges(line);
+            let x = bidi::caret_x(&edges, index, &lines[line]) - start_x;
+            return Some(point(x, line_height * line as f32));
+        }
         let mut line_start_ix = 0;
         let line_end_indices = self
             .wrap_boundaries
@@ -634,21 +777,33 @@ impl LineLayoutCache {
             drop(state);
             let text = SharedString::from(text);
             let unwrapped_layout = self.layout_line::<&SharedString>(&text, font_size, runs, None);
-            let wrap_boundaries = if let Some(wrap_width) = wrap_width {
-                unwrapped_layout.compute_wrap_boundaries(
-                    text.as_ref(),
+            let layout = if bidi::has_rtl(&text) {
+                Arc::new(self.layout_bidi_paragraph(
+                    &text,
+                    font_size,
+                    runs,
+                    unwrapped_layout,
                     wrap_width,
                     max_lines,
-                    &mut self.wrap_scratch.borrow_mut(),
-                )
+                ))
             } else {
-                SmallVec::new()
+                let wrap_boundaries = if let Some(wrap_width) = wrap_width {
+                    unwrapped_layout.compute_wrap_boundaries(
+                        text.as_ref(),
+                        wrap_width,
+                        max_lines,
+                        &mut self.wrap_scratch.borrow_mut(),
+                    )
+                } else {
+                    SmallVec::new()
+                };
+                Arc::new(WrappedLineLayout {
+                    unwrapped_layout,
+                    wrap_boundaries,
+                    wrap_width,
+                    line_starts: SmallVec::new(),
+                })
             };
-            let layout = Arc::new(WrappedLineLayout {
-                unwrapped_layout,
-                wrap_boundaries,
-                wrap_width,
-            });
             let key = Arc::new(CacheKey {
                 text,
                 font_size,
@@ -705,9 +860,7 @@ impl LineLayoutCache {
             layout
         } else {
             let text = SharedString::from(text);
-            let mut layout = self
-                .platform_text_system
-                .layout_line(&text, font_size, runs);
+            let mut layout = self.shape(&text, font_size, runs);
 
             if let Some(force_width) = force_width {
                 apply_force_width_to_layout(&mut layout, force_width);
@@ -724,6 +877,109 @@ impl LineLayoutCache {
             current_frame.lines.insert(key.clone(), layout.clone());
             current_frame.used_lines.push(key);
             layout
+        }
+    }
+
+    /// Shapes one line. Text with a right-to-left character is shaped in its paragraph's base
+    /// direction (UAX #9 P2 and P3), and its runs record their directions.
+    fn shape(&self, text: &str, font_size: Pixels, runs: &[FontRun]) -> LineLayout {
+        if !bidi::has_rtl(text) {
+            return self
+                .platform_text_system
+                .layout_line(text, font_size, runs);
+        }
+        let rtl = bidi::paragraph_is_rtl(text);
+        let mut layout = self
+            .platform_text_system
+            .layout_line_in_direction(text, font_size, runs, rtl);
+        bidi::mark_run_directions(&mut layout, text, rtl);
+        layout
+    }
+
+    /// Wraps a paragraph with right-to-left text. Lines break in logical order, measured on the
+    /// unwrapped layout; then each line is shaped on its own in the paragraph's direction, so
+    /// the shaper reorders it within the line (UAX #9 L1 to L4). The lines' glyphs follow one
+    /// another in one layout, so painting and alignment work as for any wrapped line.
+    fn layout_bidi_paragraph(
+        &self,
+        text: &str,
+        font_size: Pixels,
+        runs: &[FontRun],
+        unwrapped: Arc<LineLayout>,
+        wrap_width: Option<Pixels>,
+        max_lines: Option<usize>,
+    ) -> WrappedLineLayout {
+        let single = |unwrapped_layout| WrappedLineLayout {
+            unwrapped_layout,
+            wrap_boundaries: SmallVec::new(),
+            wrap_width,
+            line_starts: SmallVec::from_buf([0]),
+        };
+        let Some(wrap_width) = wrap_width.filter(|width| unwrapped.width > *width) else {
+            return single(unwrapped);
+        };
+        let lines = bidi::wrap_logically(
+            text,
+            &unwrapped,
+            wrap_width,
+            max_lines,
+            LineWrapper::break_indices(text),
+        );
+        if lines.len() < 2 {
+            return single(unwrapped);
+        }
+        let rtl = bidi::paragraph_is_rtl(text);
+        let mut combined = LineLayout {
+            font_size,
+            width: px(0.),
+            ascent: unwrapped.ascent,
+            descent: unwrapped.descent,
+            runs: Vec::new(),
+            len: text.len(),
+        };
+        let mut wrap_boundaries = SmallVec::new();
+        let mut line_starts = SmallVec::new();
+        for range in lines {
+            // Trailing spaces hang past the line's end, as in CSS, so they take no width and do
+            // not move a right-aligned line. CoreText also widens a right-to-left line that
+            // starts with a Latin word by its trailing space.
+            let shaped = range.start..range.start + text[range.clone()].trim_end_matches(' ').len();
+            let line_runs = bidi::runs_in(runs, shaped.clone());
+            let line_text = &text[shaped];
+            let mut line = self.platform_text_system.layout_line_in_direction(
+                line_text,
+                font_size,
+                &line_runs,
+                rtl,
+            );
+            bidi::mark_run_directions(&mut line, line_text, rtl);
+            if line.runs.iter().all(|run| run.glyphs.is_empty()) {
+                continue;
+            }
+            if !combined.runs.is_empty() {
+                wrap_boundaries.push(WrapBoundary {
+                    run_ix: combined.runs.len(),
+                    glyph_ix: 0,
+                });
+            }
+            line_starts.push(range.start);
+            let offset = combined.width;
+            for mut run in line.runs.into_iter().filter(|run| !run.glyphs.is_empty()) {
+                for glyph in &mut run.glyphs {
+                    glyph.position.x += offset;
+                    glyph.index += range.start;
+                }
+                combined.runs.push(run);
+            }
+            combined.width += line.width;
+            combined.ascent = combined.ascent.max(line.ascent);
+            combined.descent = combined.descent.max(line.descent);
+        }
+        WrappedLineLayout {
+            unwrapped_layout: Arc::new(combined),
+            wrap_boundaries,
+            wrap_width: Some(wrap_width),
+            line_starts,
         }
     }
 
@@ -878,6 +1134,7 @@ mod tests {
             runs: vec![ShapedRun {
                 font_id: FontId(0),
                 glyphs,
+                is_rtl: false,
             }],
             len: 0,
         }

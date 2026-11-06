@@ -318,6 +318,7 @@ impl<'a> ShapedLineCursor<'a> {
             let end = self.glyph_index;
             if start < end {
                 runs.push(crate::ShapedRun {
+                    is_rtl: run.is_rtl,
                     font_id: run.font_id,
                     glyphs: run.glyphs[start..end]
                         .iter()
@@ -552,6 +553,22 @@ fn paint_line(
         align_width,
         wrap_boundaries,
     );
+    if layout.has_rtl() {
+        return window.paint_layer(line_bounds, |window| {
+            paint_bidi_line(
+                BidiPaint::Glyphs(paint_underline),
+                origin,
+                layout,
+                line_height,
+                align,
+                align_width,
+                decoration_runs,
+                wrap_boundaries,
+                window,
+                cx,
+            )
+        });
+    }
     window.paint_layer(line_bounds, |window| {
         let padding_top = (line_height - layout.ascent - layout.descent) / 2.;
         let baseline_offset = point(px(0.), padding_top + layout.ascent);
@@ -815,6 +832,22 @@ fn paint_line_background(
         align_width,
         wrap_boundaries,
     );
+    if layout.has_rtl() {
+        return window.paint_layer(line_bounds, |window| {
+            paint_bidi_line(
+                BidiPaint::Backgrounds,
+                origin,
+                layout,
+                line_height,
+                align,
+                align_width,
+                decoration_runs,
+                wrap_boundaries,
+                window,
+                cx,
+            )
+        });
+    }
     window.paint_layer(line_bounds, |window| {
         let mut decoration_runs = decoration_runs.iter();
         let mut wraps = wrap_boundaries.iter().peekable();
@@ -946,6 +979,236 @@ fn paint_line_background(
     })
 }
 
+/// What [`paint_bidi_line`] paints.
+enum BidiPaint<'a> {
+    Glyphs(
+        &'a mut dyn FnMut(Range<usize>, Point<Pixels>, Pixels, &UnderlineStyle, &mut Window),
+    ),
+    Backgrounds,
+}
+
+/// A decoration span being extended glyph by glyph: its start x and the decoration run.
+struct Span<T> {
+    start: Pixels,
+    end: Pixels,
+    run: usize,
+    style: T,
+}
+
+/// Paints a line with right-to-left runs. Its glyphs are in visual order, so their byte
+/// indices are not in order: each glyph looks its decoration run up by index, and each
+/// underline, strikethrough, and background covers a visually contiguous span of glyphs with
+/// the same style.
+#[allow(clippy::too_many_arguments)]
+fn paint_bidi_line(
+    mut what: BidiPaint<'_>,
+    origin: Point<Pixels>,
+    layout: &LineLayout,
+    line_height: Pixels,
+    align: TextAlign,
+    align_width: Option<Pixels>,
+    decoration_runs: &[DecorationRun],
+    wrap_boundaries: &[WrapBoundary],
+    window: &mut Window,
+    cx: &mut App,
+) -> Result<()> {
+    let mut starts = Vec::with_capacity(decoration_runs.len());
+    let mut start = 0;
+    for run in decoration_runs {
+        starts.push(start);
+        start += run.len as usize;
+    }
+    let run_for = |index: usize| {
+        let run = starts.partition_point(|start| *start <= index);
+        (run > 0 && index < start).then(|| run - 1)
+    };
+    let run_range = |run: usize| starts[run]..starts[run] + decoration_runs[run].len as usize;
+
+    let padding_top = (line_height - layout.ascent - layout.descent) / 2.;
+    let baseline_offset = point(px(0.), padding_top + layout.ascent);
+    let underline_y = underline_y_offset(line_height, layout.ascent, layout.descent);
+    let strikethrough_y = ((layout.ascent * 0.5) + baseline_offset.y) * 0.5;
+    let text_system = cx.text_system().clone();
+    let align_width = align_width.unwrap_or(layout.width);
+
+    let mut underline: Option<Span<UnderlineStyle>> = None;
+    let mut strikethrough: Option<Span<StrikethroughStyle>> = None;
+    let mut background: Option<Span<Hsla>> = None;
+    let mut wraps = wrap_boundaries.iter().peekable();
+    let mut line_y = origin.y;
+    let mut line_x = aligned_origin_x(origin, align_width, px(0.), &align, layout, wraps.peek());
+    let mut line_start = px(0.);
+    let glyphs: Vec<(usize, usize)> = layout
+        .runs
+        .iter()
+        .enumerate()
+        .flat_map(|(run_ix, run)| (0..run.glyphs.len()).map(move |glyph_ix| (run_ix, glyph_ix)))
+        .collect();
+
+    macro_rules! paint_span {
+        (underline, $span:expr, $y:expr) => {
+            if let BidiPaint::Glyphs(paint_underline) = &mut what {
+                paint_underline(
+                    run_range($span.run),
+                    point($span.start, $y + underline_y),
+                    $span.end - $span.start,
+                    &$span.style,
+                    window,
+                );
+            }
+        };
+        (strikethrough, $span:expr, $y:expr) => {
+            window.paint_strikethrough(
+                point($span.start, $y + strikethrough_y),
+                $span.end - $span.start,
+                &$span.style,
+            )
+        };
+        (background, $span:expr, $y:expr) => {
+            window.paint_quad(fill(
+                Bounds::new(
+                    point($span.start, $y),
+                    size($span.end - $span.start, line_height),
+                ),
+                $span.style,
+            ))
+        };
+    }
+    macro_rules! flush {
+        ($y:expr) => {
+            if let Some(span) = underline.take() {
+                paint_span!(underline, span, $y);
+            }
+            if let Some(span) = strikethrough.take() {
+                paint_span!(strikethrough, span, $y);
+            }
+            if let Some(span) = background.take() {
+                paint_span!(background, span, $y);
+            }
+        };
+    }
+
+    for (position, &(run_ix, glyph_ix)) in glyphs.iter().enumerate() {
+        let run = &layout.runs[run_ix];
+        let glyph = &run.glyphs[glyph_ix];
+        if wraps.peek() == Some(&&WrapBoundary { run_ix, glyph_ix }) {
+            wraps.next();
+            flush!(line_y);
+            line_y += line_height;
+            line_start = glyph.position.x;
+            line_x = aligned_origin_x(
+                origin,
+                align_width,
+                glyph.position.x,
+                &align,
+                layout,
+                wraps.peek(),
+            );
+        }
+        let left = line_x + glyph.position.x - line_start;
+        let next_x = match glyphs.get(position + 1) {
+            Some(&(next_run, next_glyph))
+                if wraps.peek()
+                    != Some(&&WrapBoundary {
+                        run_ix: next_run,
+                        glyph_ix: next_glyph,
+                    }) =>
+            {
+                layout.runs[next_run].glyphs[next_glyph].position.x
+            }
+            _ => wraps.peek().map_or(layout.width, |boundary| {
+                layout.runs[boundary.run_ix].glyphs[boundary.glyph_ix]
+                    .position
+                    .x
+            }),
+        };
+        let right = line_x + next_x - line_start;
+        let decoration = run_for(glyph.index);
+        let style = decoration.map(|run| &decoration_runs[run]);
+
+        // Extends the slot's span over this glyph, or paints it and starts another.
+        macro_rules! extend {
+            ($slot:ident, $value:expr) => {{
+                let value = $value;
+                let continues = matches!(
+                    (&$slot, &value),
+                    (Some(span), Some(value)) if span.style == *value && span.end >= left
+                );
+                if continues {
+                    if let Some(span) = $slot.as_mut() {
+                        span.end = span.end.max(right);
+                    }
+                } else {
+                    if let Some(span) = $slot.take() {
+                        paint_span!($slot, span, line_y);
+                    }
+                    $slot = value.map(|style| Span {
+                        start: left,
+                        end: right,
+                        run: decoration.unwrap_or_default(),
+                        style,
+                    });
+                }
+            }};
+        }
+
+        match &mut what {
+            BidiPaint::Backgrounds => {
+                extend!(background, style.and_then(|style| style.background_color));
+            }
+            BidiPaint::Glyphs(_) => {
+                extend!(
+                    underline,
+                    style.and_then(|style| style.underline.as_ref()).map(|underline| {
+                        UnderlineStyle {
+                            color: Some(underline.color.unwrap_or(style.unwrap().color)),
+                            thickness: underline.thickness,
+                            wavy: underline.wavy,
+                        }
+                    })
+                );
+                extend!(
+                    strikethrough,
+                    style
+                        .and_then(|style| style.strikethrough.as_ref())
+                        .map(|strikethrough| StrikethroughStyle {
+                            color: Some(strikethrough.color.unwrap_or(style.unwrap().color)),
+                            thickness: strikethrough.thickness,
+                        })
+                );
+                let color = style.map_or(black(), |style| style.color);
+                let glyph_origin = point(left, line_y);
+                let max_glyph_size = text_system.bounding_box(run.font_id, layout.font_size).size;
+                let max_glyph_bounds = Bounds {
+                    origin: glyph_origin,
+                    size: max_glyph_size,
+                };
+                if max_glyph_bounds.intersects(&window.content_mask().bounds) {
+                    let vertical_offset = point(px(0.0), glyph.position.y);
+                    if glyph.is_emoji {
+                        window.paint_emoji(
+                            glyph_origin + baseline_offset + vertical_offset,
+                            run.font_id,
+                            glyph.id,
+                            layout.font_size,
+                        )?;
+                    } else {
+                        window.paint_glyph(
+                            glyph_origin + baseline_offset + vertical_offset,
+                            run.font_id,
+                            glyph.id,
+                            layout.font_size,
+                            color,
+                        )?;
+                    }
+                }
+            }
+        }
+    }
+    flush!(line_y);
+    Ok(())
+}
+
 fn line_paint_bounds(
     origin: Point<Pixels>,
     layout: &LineLayout,
@@ -1049,6 +1312,7 @@ mod tests {
                 descent: px(4.0),
                 runs: vec![ShapedRun {
                     font_id: FontId(0),
+                    is_rtl: false,
                     glyphs: shaped_glyphs,
                 }],
                 len: text.len(),
@@ -1385,6 +1649,7 @@ mod tests {
                             glyph_ix: 2,
                         }]),
                         wrap_width: Some(px(16.)),
+                        line_starts: SmallVec::new(),
                     }),
                     text: line.text,
                     decoration_runs: line.decoration_runs.into_vec(),
@@ -1496,6 +1761,7 @@ mod tests {
                 runs: vec![
                     ShapedRun {
                         font_id: FontId(0),
+                        is_rtl: false,
                         glyphs: vec![
                             ShapedGlyph {
                                 id: GlyphId(0),
@@ -1519,6 +1785,7 @@ mod tests {
                     },
                     ShapedRun {
                         font_id: FontId(1),
+                        is_rtl: false,
                         glyphs: vec![
                             ShapedGlyph {
                                 id: GlyphId(0),
@@ -1742,6 +2009,7 @@ mod tests {
                 runs: vec![
                     ShapedRun {
                         font_id: FontId(3),
+                        is_rtl: false,
                         glyphs: vec![
                             ShapedGlyph {
                                 id: GlyphId(11),
@@ -1765,6 +2033,7 @@ mod tests {
                     },
                     ShapedRun {
                         font_id: FontId(8),
+                        is_rtl: false,
                         glyphs: vec![
                             ShapedGlyph {
                                 id: GlyphId(21),

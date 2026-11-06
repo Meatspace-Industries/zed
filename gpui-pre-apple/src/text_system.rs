@@ -214,7 +214,17 @@ impl PlatformTextSystem for AppleTextSystem {
     }
 
     fn layout_line(&self, text: &str, font_size: Pixels, font_runs: &[FontRun]) -> LineLayout {
-        self.0.write().layout_line(text, font_size, font_runs)
+        self.0.write().layout_line(text, font_size, font_runs, None)
+    }
+
+    fn layout_line_in_direction(
+        &self,
+        text: &str,
+        font_size: Pixels,
+        font_runs: &[FontRun],
+        rtl: bool,
+    ) -> LineLayout {
+        self.0.write().layout_line(text, font_size, font_runs, Some(rtl))
     }
 
     fn recommended_rendering_mode(
@@ -625,7 +635,15 @@ impl AppleTextSystemState {
         }
     }
 
-    fn layout_line(&mut self, text: &str, font_size: Pixels, font_runs: &[FontRun]) -> LineLayout {
+    /// `base_rtl` sets the paragraph's base writing direction; `None` lets CoreText take it
+    /// from the line's first strong character.
+    fn layout_line(
+        &mut self,
+        text: &str,
+        font_size: Pixels,
+        font_runs: &[FontRun],
+        base_rtl: Option<bool>,
+    ) -> LineLayout {
         // Construct the attributed string, converting UTF8 ranges to UTF16 ranges.
         let mut string = CFMutableAttributedString::new();
         let mut max_ascent = 0.0f32;
@@ -674,6 +692,9 @@ impl AppleTextSystemState {
                 }
             }
         }
+        if let Some(rtl) = base_rtl {
+            set_base_writing_direction(&mut string, rtl);
+        }
         // Retrieve the glyphs from the shaped line, converting UTF16 offsets to UTF8 offsets.
         let line = CTLine::new_with_attributed_string(string.as_concrete_TypeRef());
         let glyph_runs = line.glyph_runs();
@@ -695,6 +716,7 @@ impl AppleTextSystemState {
                     runs.push(ShapedRun {
                         font_id,
                         glyphs: Vec::with_capacity(run.glyph_count().try_into().unwrap_or(0)),
+                        is_rtl: false,
                     });
                     &mut runs.last_mut().unwrap().glyphs
                 }
@@ -728,6 +750,47 @@ impl AppleTextSystemState {
             descent: max_descent.into(),
             len: text.len(),
         }
+    }
+}
+
+/// `kCTParagraphStyleSpecifierBaseWritingDirection`.
+const BASE_WRITING_DIRECTION: u32 = 13;
+
+#[repr(C)]
+struct CTParagraphStyleSetting {
+    spec: u32,
+    value_size: usize,
+    value: *const std::ffi::c_void,
+}
+
+unsafe extern "C" {
+    fn CTParagraphStyleCreate(
+        settings: *const CTParagraphStyleSetting,
+        count: usize,
+    ) -> core_foundation::base::CFTypeRef;
+}
+
+/// Sets the paragraph's base writing direction (UAX #9 P2 and P3, resolved by GPUI), so that a
+/// line of a right-to-left paragraph that starts with a Latin word still reads right to left.
+fn set_base_writing_direction(string: &mut CFMutableAttributedString, rtl: bool) {
+    // `kCTWritingDirectionLeftToRight` and `kCTWritingDirectionRightToLeft`.
+    let direction: i8 = if rtl { 1 } else { 0 };
+    let setting = CTParagraphStyleSetting {
+        spec: BASE_WRITING_DIRECTION,
+        value_size: std::mem::size_of::<i8>(),
+        value: (&direction as *const i8).cast(),
+    };
+    unsafe {
+        let style = CTParagraphStyleCreate(&setting, 1);
+        if style.is_null() {
+            return;
+        }
+        let style = core_foundation::base::CFType::wrap_under_create_rule(style);
+        string.set_attribute(
+            CFRange::init(0, string.char_len()),
+            core_text::string_attributes::kCTParagraphStyleAttributeName,
+            &style,
+        );
     }
 }
 

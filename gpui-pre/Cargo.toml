@@ -544,6 +544,9 @@ version = "2.0.12"
 [dependencies.ttf-parser]
 version = "0.25"
 
+[dependencies.unicode-bidi]
+version = "0.3.18"
+
 [dependencies.unicode-segmentation]
 version = "1.10"
 

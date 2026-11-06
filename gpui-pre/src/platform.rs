@@ -1578,6 +1578,18 @@ pub trait PlatformTextSystem: Send + Sync {
     ) -> Result<(Size<DevicePixels>, Vec<u8>)>;
     /// Layout a line of text with the given font runs.
     fn layout_line(&self, text: &str, font_size: Pixels, runs: &[FontRun]) -> LineLayout;
+    /// Layout a line of text in a paragraph whose base direction (UAX #9 P2 and P3) is
+    /// right-to-left when `rtl` is true. The shaper reorders the line from that direction rather
+    /// than from the line's own first strong character. The default ignores the direction.
+    fn layout_line_in_direction(
+        &self,
+        text: &str,
+        font_size: Pixels,
+        runs: &[FontRun],
+        _rtl: bool,
+    ) -> LineLayout {
+        self.layout_line(text, font_size, runs)
+    }
     /// Returns the recommended text rendering mode for the given font and size.
     fn recommended_rendering_mode(&self, _font_id: FontId, _font_size: Pixels)
     -> TextRenderingMode;
@@ -1693,6 +1705,7 @@ impl PlatformTextSystem for NoopTextSystem {
             runs.push(ShapedRun {
                 font_id: FontId(0),
                 glyphs,
+                is_rtl: false,
             });
         } else {
             position = px(0.);

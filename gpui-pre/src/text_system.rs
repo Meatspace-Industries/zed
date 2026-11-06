@@ -1,3 +1,4 @@
+mod bidi;
 mod font_fallbacks;
 mod font_features;
 mod line;
