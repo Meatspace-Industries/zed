@@ -4258,6 +4258,28 @@ impl Window {
         &self.rendered_frame.recorded_text_inputs
     }
 
+    /// Types `text` at the focused text input's selection, as an input method would, without
+    /// key events. Returns false when no text input has focus.
+    pub fn insert_text_in_focused_input(&mut self, text: &str, cx: &mut App) -> bool {
+        let Some(mut handler) = self.platform_window.take_input_handler() else {
+            return false;
+        };
+        handler.insert_text_for_tools(text, self, cx);
+        self.platform_window.set_input_handler(handler);
+        true
+    }
+
+    /// Replaces all the text of the focused text input. Returns false when no text input has
+    /// focus or the input cannot report its text.
+    pub fn replace_focused_input_text(&mut self, text: &str, cx: &mut App) -> bool {
+        let Some(mut handler) = self.platform_window.take_input_handler() else {
+            return false;
+        };
+        let replaced = handler.replace_all_text_for_tools(text, self, cx);
+        self.platform_window.set_input_handler(handler);
+        replaced
+    }
+
     pub(crate) fn record_view_type(&mut self, view: EntityId, type_name: &'static str) {
         if self.frame_recording {
             self.recorded_view_types.insert(view, type_name);

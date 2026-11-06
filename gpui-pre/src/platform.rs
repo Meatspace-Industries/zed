@@ -2106,6 +2106,35 @@ impl PlatformInputHandler {
             .flatten()
     }
 
+    /// Inserts `text` at the selection while the window is already borrowed.
+    pub(crate) fn insert_text_for_tools(&mut self, text: &str, window: &mut Window, cx: &mut App) {
+        self.handler.replace_text_in_range(None, text, window, cx);
+    }
+
+    /// Replaces all text while the window is already borrowed. Returns false when the handler
+    /// cannot report its text.
+    pub(crate) fn replace_all_text_for_tools(
+        &mut self,
+        text: &str,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> bool {
+        let mut document = None;
+        if self
+            .handler
+            .text_for_range(0..usize::MAX, &mut document, window, cx)
+            .is_none()
+        {
+            return false;
+        }
+        let Some(document) = document else {
+            return false;
+        };
+        self.handler
+            .replace_text_in_range(Some(document), text, window, cx);
+        true
+    }
+
     pub fn replace_text_in_range(&mut self, replacement_range: Option<Range<usize>>, text: &str) {
         self.cx
             .update(|window, cx| {
