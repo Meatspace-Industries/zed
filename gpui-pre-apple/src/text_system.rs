@@ -4,8 +4,9 @@ use core_foundation::{
     array::{CFArray, CFArrayRef},
     attributed_string::CFMutableAttributedString,
     base::{CFRange, TCFType},
+    dictionary::{CFDictionary, CFDictionaryRef},
     number::CFNumber,
-    string::CFString,
+    string::{CFString, CFStringRef},
 };
 use core_graphics::{
     base::{CGFloat, CGGlyph, kCGImageAlphaPremultipliedLast},
@@ -14,11 +15,11 @@ use core_graphics::{
     geometry::CGPoint,
 };
 use core_text::{
-    font::CTFont,
+    font::{CTFont, CTFontRef},
     font_collection::CTFontCollectionRef,
     font_descriptor::{
-        CTFontDescriptor, kCTFontSlantTrait, kCTFontSymbolicTrait, kCTFontWeightTrait,
-        kCTFontWidthTrait,
+        CTFontDescriptor, CTFontDescriptorRef, kCTFontSlantTrait, kCTFontSymbolicTrait,
+        kCTFontVariationAttribute, kCTFontWeightTrait, kCTFontWidthTrait,
     },
     line::CTLine,
     string_attributes::kCTFontAttributeName,
@@ -174,6 +175,9 @@ impl PlatformTextSystem for AppleTextSystem {
             )?;
 
             let font_id = candidates[ix];
+            let font_id = lock
+                .weight_instance(font_id, font.weight)
+                .unwrap_or(font_id);
             lock.font_selections.insert(font.clone(), font_id);
             Ok(font_id)
         }
@@ -398,6 +402,90 @@ impl AppleTextSystemState {
 
     fn glyph_for_char(&self, font_id: FontId, ch: char) -> Option<GlyphId> {
         self.fonts[font_id.0].glyph_for_char(ch).map(GlyphId)
+    }
+
+    /// The instance of a variable font at `weight`, when the font has a `wght` axis and its
+    /// current instance has another weight. font-kit matches a weight against the faces of a
+    /// family, and a variable font is one face, so without this every weight draws the font's
+    /// default instance. CoreText names each instance, such as `Roboto-Medium`, so the shaped
+    /// runs map back to the instance through `id_for_native_font`.
+    fn weight_instance(&mut self, font_id: FontId, weight: FontWeight) -> Option<FontId> {
+        const WGHT: i64 = 0x7767_6874;
+        unsafe extern "C" {
+            static kCTFontVariationAxisIdentifierKey: CFStringRef;
+            static kCTFontVariationAxisMinimumValueKey: CFStringRef;
+            static kCTFontVariationAxisMaximumValueKey: CFStringRef;
+            static kCTFontVariationAxisDefaultValueKey: CFStringRef;
+            fn CTFontCopyVariation(font: CTFontRef) -> CFDictionaryRef;
+            fn CTFontCreateCopyWithAttributes(
+                font: CTFontRef,
+                size: CGFloat,
+                matrix: *const core_graphics::geometry::CGAffineTransform,
+                attributes: CTFontDescriptorRef,
+            ) -> CTFontRef;
+        }
+        let native = self.fonts[font_id.0].native_font();
+        let number = |axis: &CFDictionary<CFString, core_foundation::base::CFType>, key| {
+            axis.find(key)
+                .and_then(|value| value.downcast::<CFNumber>())
+                .and_then(|value| value.to_f64())
+        };
+        let (minimum, maximum, default) = native.get_variation_axes()?.iter().find_map(|axis| {
+            let tag = unsafe { number(&axis, kCTFontVariationAxisIdentifierKey) }?;
+            (tag as i64 == WGHT).then(|| unsafe {
+                Some((
+                    number(&axis, kCTFontVariationAxisMinimumValueKey)?,
+                    number(&axis, kCTFontVariationAxisMaximumValueKey)?,
+                    number(&axis, kCTFontVariationAxisDefaultValueKey)?,
+                ))
+            })?
+        })?;
+        let current = unsafe {
+            let variation = CTFontCopyVariation(native.as_concrete_TypeRef());
+            if variation.is_null() {
+                None
+            } else {
+                let variation: CFDictionary<CFNumber, CFNumber> =
+                    TCFType::wrap_under_create_rule(variation);
+                variation
+                    .find(CFNumber::from(WGHT))
+                    .and_then(|value| value.to_f64())
+            }
+        }
+        .unwrap_or(default);
+        let target = f64::from(weight.0).clamp(minimum, maximum);
+        if (target - current).abs() < 0.5 {
+            return None;
+        }
+
+        let variation =
+            CFDictionary::from_CFType_pairs(&[(CFNumber::from(WGHT), CFNumber::from(target))]);
+        let attributes = CFDictionary::from_CFType_pairs(&[(
+            unsafe { CFString::wrap_under_get_rule(kCTFontVariationAttribute) },
+            variation.as_CFType(),
+        )]);
+        let descriptor = core_text::font_descriptor::new_from_attributes(&attributes);
+        // Size 0 keeps the font's size; the copy keeps its features and fallbacks.
+        let instance = unsafe {
+            CTFont::wrap_under_create_rule(CTFontCreateCopyWithAttributes(
+                native.as_concrete_TypeRef(),
+                0.0,
+                std::ptr::null(),
+                descriptor.as_concrete_TypeRef(),
+            ))
+        };
+        let postscript_name = instance.postscript_name();
+        if let Some(font_id) = self.font_ids_by_postscript_name.get(&postscript_name) {
+            return Some(*font_id);
+        }
+        let font_id = FontId(self.fonts.len());
+        self.font_ids_by_postscript_name
+            .insert(postscript_name.clone(), font_id);
+        self.postscript_names_by_font_id
+            .insert(font_id, postscript_name);
+        self.fonts
+            .push(unsafe { FontKitFont::from_native_font(&instance) });
+        Some(font_id)
     }
 
     fn id_for_native_font(&mut self, requested_font: CTFont) -> FontId {
