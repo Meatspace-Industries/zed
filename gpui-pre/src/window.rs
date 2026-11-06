@@ -68,9 +68,12 @@ use std::{
 use uuid::Uuid;
 
 pub(crate) mod a11y;
+mod frame_record;
 mod prompts;
 
 pub use a11y::A11ySubtreeBuilder;
+pub(crate) use frame_record::RecordedInteractivity;
+pub use frame_record::{InteractionFlags, RecordedElement, RecordedText};
 
 use self::a11y::A11y;
 #[cfg(not(target_family = "wasm"))]
@@ -1058,6 +1061,8 @@ pub(crate) struct Frame {
     #[cfg(any(feature = "inspector", debug_assertions))]
     pub(crate) inspector_hitboxes: FxHashMap<HitboxId, crate::InspectorElementId>,
     pub(crate) tab_stops: TabStopMap,
+    pub(crate) recorded_elements: Vec<RecordedElement>,
+    pub(crate) recorded_text_inputs: Vec<FocusId>,
 }
 
 #[derive(Clone, Default)]
@@ -1068,6 +1073,7 @@ pub(crate) struct PrepaintStateIndex {
     dispatch_tree_index: usize,
     accessed_element_states_index: usize,
     line_layout_index: LineLayoutIndex,
+    recorded_elements_index: usize,
 }
 
 #[derive(Clone, Default)]
@@ -1081,6 +1087,7 @@ pub(crate) struct PaintIndex {
     accessed_element_states_index: usize,
     tab_handle_index: usize,
     line_layout_index: LineLayoutIndex,
+    recorded_text_inputs_index: usize,
 }
 
 impl Frame {
@@ -1117,6 +1124,8 @@ impl Frame {
             #[cfg(any(feature = "inspector", debug_assertions))]
             inspector_hitboxes: FxHashMap::default(),
             tab_stops: TabStopMap::default(),
+            recorded_elements: Vec::new(),
+            recorded_text_inputs: Vec::new(),
         }
     }
 
@@ -1133,6 +1142,8 @@ impl Frame {
         self.window_control_hitboxes.clear();
         self.deferred_draws.clear();
         self.tab_stops.clear();
+        self.recorded_elements.clear();
+        self.recorded_text_inputs.clear();
         self.focus = None;
 
         #[cfg(any(test, feature = "test-support"))]
@@ -1304,6 +1315,10 @@ pub struct Window {
     #[cfg(feature = "profiler")]
     debug_frame_overlay: crate::debug_overlay::DebugFrameOverlay,
     pub(crate) a11y: A11y,
+    frame_recording: bool,
+    record_stack: Vec<usize>,
+    record_paint_stack: Vec<usize>,
+    recorded_view_types: FxHashMap<EntityId, &'static str>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -2429,6 +2444,10 @@ impl Window {
                 accessibility_force_disabled,
                 initial_window_title,
             ),
+            frame_recording: false,
+            record_stack: Vec::new(),
+            record_paint_stack: Vec::new(),
+            recorded_view_types: FxHashMap::default(),
         })
     }
 
@@ -3665,6 +3684,7 @@ impl Window {
         self.invalidate_entities();
         cx.entities.clear_accessed();
         debug_assert!(self.rendered_entity_stack.is_empty());
+        self.recorded_view_types.clear();
         self.invalidator.set_dirty(false);
         self.requested_autoscroll = None;
 
@@ -4209,6 +4229,134 @@ impl Window {
         sorted_indices
     }
 
+    /// Turns the frame record on or off. While it is on, each drawn frame records its elements
+    /// and the text they painted. See [`RecordedElement`].
+    pub fn set_frame_recording(&mut self, enabled: bool) {
+        if self.frame_recording != enabled {
+            self.frame_recording = enabled;
+            self.refresh();
+        }
+    }
+
+    /// Whether each drawn frame records its elements.
+    pub fn is_frame_recording(&self) -> bool {
+        self.frame_recording
+    }
+
+    /// Whether the window has changes that no frame has drawn yet, so the record is stale.
+    pub fn has_pending_frame(&self) -> bool {
+        self.invalidator.is_dirty()
+    }
+
+    /// The elements drawn in the last frame, parents before children.
+    pub fn recorded_elements(&self) -> &[RecordedElement] {
+        &self.rendered_frame.recorded_elements
+    }
+
+    /// The focus handles that registered a text input handler in the last frame.
+    pub fn recorded_text_inputs(&self) -> &[FocusId] {
+        &self.rendered_frame.recorded_text_inputs
+    }
+
+    pub(crate) fn record_view_type(&mut self, view: EntityId, type_name: &'static str) {
+        if self.frame_recording {
+            self.recorded_view_types.insert(view, type_name);
+        }
+    }
+
+    pub(crate) fn record_push_element(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        id: Option<&GlobalElementId>,
+        source: Option<&'static std::panic::Location<'static>>,
+        type_name: &'static str,
+        a11y: Option<(accesskit::Role, accesskit::Node)>,
+    ) -> Option<usize> {
+        if !self.frame_recording {
+            return None;
+        }
+        let view = self.rendered_entity_stack.last().copied();
+        let index = self.next_frame.recorded_elements.len();
+        self.next_frame.recorded_elements.push(RecordedElement {
+            parent: self.record_stack.last().copied(),
+            type_name,
+            id: id.cloned(),
+            source,
+            view,
+            view_type: view.and_then(|view| self.recorded_view_types.get(&view).copied()),
+            bounds,
+            visible_bounds: frame_record::visible(bounds, self.content_mask()),
+            role: a11y.as_ref().map(|(role, _)| *role),
+            label: a11y
+                .as_ref()
+                .and_then(|(_, node)| node.label())
+                .map(|label| label.to_string().into()),
+            value: a11y
+                .as_ref()
+                .and_then(|(_, node)| node.value())
+                .map(|value| value.to_string().into()),
+            disabled: a11y.as_ref().is_some_and(|(_, node)| node.is_disabled()),
+            toggled: a11y.as_ref().and_then(|(_, node)| node.toggled()),
+            flags: InteractionFlags::default(),
+            key_context: None,
+            focus: None,
+            hitbox: None,
+            style: None,
+            texts: Vec::new(),
+        });
+        self.record_stack.push(index);
+        Some(index)
+    }
+
+    pub(crate) fn record_pop_element(&mut self, pushed: Option<usize>) {
+        if pushed.is_some() {
+            self.record_stack.pop();
+        }
+    }
+
+    pub(crate) fn record_push_paint(&mut self, element: Option<usize>) {
+        if let Some(element) = element {
+            self.record_paint_stack.push(element);
+        }
+    }
+
+    pub(crate) fn record_pop_paint(&mut self, element: Option<usize>) {
+        if element.is_some() {
+            self.record_paint_stack.pop();
+        }
+    }
+
+    pub(crate) fn record_interactivity(&mut self, interactivity: RecordedInteractivity) {
+        if let Some(&index) = self.record_stack.last() {
+            let element = &mut self.next_frame.recorded_elements[index];
+            let input = element.flags.input;
+            element.flags = interactivity.flags;
+            element.flags.input = input;
+            element.key_context = interactivity.key_context;
+            element.focus = interactivity.focus;
+            element.hitbox = interactivity.hitbox;
+            element.style = Some(Rc::new(interactivity.style));
+        }
+    }
+
+    pub(crate) fn record_text(&mut self, bounds: Bounds<Pixels>, text: &SharedString) {
+        if !self.frame_recording {
+            return;
+        }
+        let visible_bounds = frame_record::visible(bounds, self.content_mask());
+        if let Some(element) = self
+            .record_paint_stack
+            .last()
+            .and_then(|&index| self.next_frame.recorded_elements.get_mut(index))
+        {
+            element.texts.push(RecordedText {
+                bounds,
+                visible_bounds,
+                text: text.clone(),
+            });
+        }
+    }
+
     pub(crate) fn prepaint_index(&self) -> PrepaintStateIndex {
         PrepaintStateIndex {
             hitboxes_index: self.next_frame.hitboxes.len(),
@@ -4217,10 +4365,26 @@ impl Window {
             dispatch_tree_index: self.next_frame.dispatch_tree.len(),
             accessed_element_states_index: self.next_frame.accessed_element_states.len(),
             line_layout_index: self.text_system.layout_index(),
+            recorded_elements_index: self.next_frame.recorded_elements.len(),
         }
     }
 
     pub(crate) fn reuse_prepaint(&mut self, range: Range<PrepaintStateIndex>) {
+        if self.frame_recording {
+            let start = range.start.recorded_elements_index;
+            let end = range.end.recorded_elements_index;
+            // A cached view recorded while recording was off has no elements to copy.
+            if end <= self.rendered_frame.recorded_elements.len() {
+                let reused = frame_record::reparent(
+                    &self.rendered_frame.recorded_elements[start..end],
+                    start,
+                    self.next_frame.recorded_elements.len(),
+                    self.record_stack.last().copied(),
+                )
+                .collect::<Vec<_>>();
+                self.next_frame.recorded_elements.extend(reused);
+            }
+        }
         self.next_frame.hitboxes.extend(
             self.rendered_frame.hitboxes[range.start.hitboxes_index..range.end.hitboxes_index]
                 .iter()
@@ -4282,10 +4446,20 @@ impl Window {
             accessed_element_states_index: self.next_frame.accessed_element_states.len(),
             tab_handle_index: self.next_frame.tab_stops.paint_index(),
             line_layout_index: self.text_system.layout_index(),
+            recorded_text_inputs_index: self.next_frame.recorded_text_inputs.len(),
         }
     }
 
     pub(crate) fn reuse_paint(&mut self, range: Range<PaintIndex>) {
+        if let Some(reused) = self
+            .rendered_frame
+            .recorded_text_inputs
+            .get(range.start.recorded_text_inputs_index..range.end.recorded_text_inputs_index)
+        {
+            self.next_frame
+                .recorded_text_inputs
+                .extend_from_slice(reused);
+        }
         // Cached elements still exist in the frame even when their paint methods don't run.
         #[cfg(any(test, feature = "test-support"))]
         for (selector, bounds) in &self.rendered_frame.debug_bounds_records
@@ -4477,6 +4651,9 @@ impl Window {
             self.next_frame
                 .accessed_element_states
                 .truncate(index.accessed_element_states_index);
+            self.next_frame
+                .recorded_elements
+                .truncate(index.recorded_elements_index);
             self.text_system.truncate_layouts(index.line_layout_index);
         }
         result
@@ -5622,6 +5799,13 @@ impl Window {
         cx: &App,
     ) {
         self.invalidator.debug_assert_paint();
+
+        if self.frame_recording {
+            self.next_frame.recorded_text_inputs.push(focus_handle.id);
+            if let Some(&index) = self.record_paint_stack.last() {
+                self.next_frame.recorded_elements[index].flags.input = true;
+            }
+        }
 
         if focus_handle.is_focused(self) {
             let cx = self.to_async(cx);

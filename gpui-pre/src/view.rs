@@ -183,6 +183,7 @@ mod any_view {
         cx: &mut App,
     ) -> AnyElement {
         let view = view.clone().downcast::<V>().unwrap();
+        window.record_view_type(view.entity_id(), std::any::type_name::<V>());
         // Record the view's Render type name so the accessibility debug dump can
         // attribute nodes to the view that produced them.
         #[cfg(debug_assertions)]
@@ -240,6 +241,7 @@ impl<T: Render> View for Entity<T> {
 
     #[inline]
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        window.record_view_type(Entity::entity_id(&self), type_name::<T>());
         self.update(cx, |this, cx| {
             Render::render(this, window, cx).into_any_element()
         })

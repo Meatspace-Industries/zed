@@ -142,6 +142,10 @@ impl ShapedLine {
             &mut Window,
         ),
     ) -> Result<()> {
+        window.record_text(
+            crate::Bounds::new(origin, crate::size(self.layout.width, line_height)),
+            &self.text,
+        );
         paint_line(
             origin,
             &self.layout,
@@ -471,6 +475,10 @@ impl WrappedLine {
             None => self.layout.wrap_width,
         };
 
+        window.record_text(
+            crate::Bounds::new(origin, self.layout.size(line_height)),
+            &self.text,
+        );
         paint_line(
             origin,
             &self.layout.unwrapped_layout,

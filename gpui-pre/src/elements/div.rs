@@ -2444,6 +2444,49 @@ impl Interactivity {
                                 None
                             };
 
+                            if window.is_frame_recording() {
+                                let flags = crate::InteractionFlags {
+                                    click: !self.click_listeners.is_empty()
+                                        || !self.aux_click_listeners.is_empty(),
+                                    mouse: !self.mouse_down_listeners.is_empty()
+                                        || !self.mouse_up_listeners.is_empty()
+                                        || !self.mouse_move_listeners.is_empty()
+                                        || !self.mouse_pressure_listeners.is_empty(),
+                                    keys: !self.key_down_listeners.is_empty()
+                                        || !self.key_up_listeners.is_empty()
+                                        || !self.action_listeners.is_empty(),
+                                    hover: self.hover_style.is_some()
+                                        || self.group_hover_style.is_some()
+                                        || self.hover_listener.is_some(),
+                                    focusable: self.tracked_focus_handle.is_some(),
+                                    focused: self
+                                        .tracked_focus_handle
+                                        .as_ref()
+                                        .is_some_and(|handle| handle.is_focused(window)),
+                                    input: false,
+                                    scroll: self.scroll_offset.is_some()
+                                        || !self.scroll_listeners.is_empty(),
+                                    drag: self.drag_listener.is_some(),
+                                    drop: !self.drop_listeners.is_empty(),
+                                    tooltip: self.tooltip_builder.is_some(),
+                                    blocks: self.hitbox_behavior != HitboxBehavior::Normal,
+                                };
+                                window.record_interactivity(crate::window::RecordedInteractivity {
+                                    flags,
+                                    key_context: self
+                                        .key_context
+                                        .as_ref()
+                                        .and_then(|context| context.primary())
+                                        .map(|entry| entry.key.clone()),
+                                    focus: self
+                                        .tracked_focus_handle
+                                        .as_ref()
+                                        .map(|handle| handle.id),
+                                    hitbox: hitbox.as_ref().map(|hitbox| hitbox.id),
+                                    style: style.clone(),
+                                });
+                            }
+
                             let scroll_offset =
                                 self.clamp_scroll_position(bounds, &style, window, cx);
                             let result = window.with_element_opacity(style.opacity, |window| {

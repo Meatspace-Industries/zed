@@ -338,6 +338,7 @@ enum ElementDrawPhase<RequestLayoutState, PrepaintState> {
     },
     Prepaint {
         node_id: DispatchNodeId,
+        recorded_element: Option<usize>,
         global_id: Option<GlobalElementId>,
         inspector_id: Option<InspectorElementId>,
         bounds: Bounds<Pixels>,
@@ -424,6 +425,22 @@ impl<E: Element> Drawable<E> {
                 }
 
                 let bounds = window.layout_bounds(layout_id);
+                let recorded_a11y = if window.is_frame_recording() {
+                    self.element.a11y_role().map(|role| {
+                        let mut node = accesskit::Node::new(role);
+                        self.element.write_a11y_info(&mut node);
+                        (role, node)
+                    })
+                } else {
+                    None
+                };
+                let recorded_element = window.record_push_element(
+                    bounds,
+                    global_id.as_ref(),
+                    self.element.source_location(),
+                    std::any::type_name::<E>(),
+                    recorded_a11y,
+                );
                 let mut pushed_a11y_node = false;
                 if window.a11y.is_active() {
                     if let Some(global_id) = global_id.as_ref() {
@@ -472,6 +489,7 @@ impl<E: Element> Drawable<E> {
                     cx,
                 );
                 window.next_frame.dispatch_tree.pop_node();
+                window.record_pop_element(recorded_element);
 
                 if pushed_a11y_node {
                     if let Some(global_id) = global_id.as_ref() {
@@ -505,6 +523,7 @@ impl<E: Element> Drawable<E> {
 
                 self.phase = ElementDrawPhase::Prepaint {
                     node_id,
+                    recorded_element,
                     global_id,
                     inspector_id,
                     bounds,
@@ -524,6 +543,7 @@ impl<E: Element> Drawable<E> {
         match mem::take(&mut self.phase) {
             ElementDrawPhase::Prepaint {
                 node_id,
+                recorded_element,
                 global_id,
                 inspector_id,
                 bounds,
@@ -537,6 +557,7 @@ impl<E: Element> Drawable<E> {
                 }
 
                 window.next_frame.dispatch_tree.set_active_node(node_id);
+                window.record_push_paint(recorded_element);
                 self.element.paint(
                     global_id.as_ref(),
                     inspector_id.as_ref(),
@@ -546,6 +567,7 @@ impl<E: Element> Drawable<E> {
                     window,
                     cx,
                 );
+                window.record_pop_paint(recorded_element);
 
                 if global_id.is_some() {
                     window.element_id_stack.pop();
