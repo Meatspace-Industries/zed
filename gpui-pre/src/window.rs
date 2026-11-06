@@ -1319,6 +1319,7 @@ pub struct Window {
     record_stack: Vec<usize>,
     record_paint_stack: Vec<usize>,
     recorded_view_types: FxHashMap<EntityId, &'static str>,
+    hidden_frames: Option<Task<()>>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -2448,6 +2449,7 @@ impl Window {
             record_stack: Vec::new(),
             record_paint_stack: Vec::new(),
             recorded_view_types: FxHashMap::default(),
+            hidden_frames: None,
         })
     }
 
@@ -3601,6 +3603,45 @@ impl Window {
         self.rendered_frame
             .dispatch_tree
             .is_action_available(action, node_id)
+    }
+
+    /// Keeps drawing frames while the window is hidden, for tools that read the frame record or
+    /// render the window to an image while nobody looks at it.
+    ///
+    /// The platform stops requesting frames for a hidden window: AppKit stops the display link
+    /// of an occluded, minimized, or off-Space window. While this is on and the window is
+    /// hidden, a timer runs next-frame callbacks and draws each pending frame. It does not
+    /// present; the platform presents the latest frame when the window is visible again.
+    pub fn set_draw_while_hidden(&mut self, enabled: bool, cx: &mut App) {
+        if !enabled {
+            self.hidden_frames = None;
+            return;
+        }
+        if self.hidden_frames.is_some() {
+            return;
+        }
+        const INTERVAL: Duration = Duration::from_millis(16);
+        let handle = self.handle;
+        self.hidden_frames = Some(cx.spawn(async move |cx| {
+            loop {
+                cx.background_executor().timer(INTERVAL).await;
+                let drawn = handle.update(cx, |_, window, cx| {
+                    if window.visibility.is_visible() {
+                        return;
+                    }
+                    let callbacks = window.next_frame_callbacks.take();
+                    for callback in callbacks {
+                        callback(window, cx);
+                    }
+                    if window.invalidator.is_dirty() {
+                        window.draw(cx).clear(cx);
+                    }
+                });
+                if drawn.is_err() {
+                    break;
+                }
+            }
+        }));
     }
 
     /// The position of the mouse relative to the window.
