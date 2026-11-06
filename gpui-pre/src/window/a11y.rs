@@ -133,6 +133,9 @@ pub(crate) struct A11y {
     /// Updated by AccessKit using callbacks provided to the adapter. Can change
     /// halfway through a frame.
     active_flag: Arc<AtomicBool>,
+    /// Whether a tool forced the tree on without assistive technology. See
+    /// [`crate::Window::force_a11y_active`].
+    forced_active: bool,
     /// Whether a11y features are active for *this specific frame*.
     ///
     /// At the start of each frame, we load [`Self::active_flag`] (using
@@ -172,6 +175,7 @@ impl A11y {
         Self {
             force_disabled,
             active_flag,
+            forced_active: false,
             active_this_frame: false,
             nodes: A11yNodeBuilder::new(),
             focus_ids: FxHashMap::default(),
@@ -210,7 +214,12 @@ impl A11y {
     /// See the docs for [`Self::active_flag`] and [`Self::active_this_frame`]
     /// for more commentary.
     pub(crate) fn sync_active_flag(&mut self) {
-        self.active_this_frame = self.is_enabled() && self.active_flag.load(Ordering::SeqCst);
+        self.active_this_frame =
+            self.is_enabled() && (self.forced_active || self.active_flag.load(Ordering::SeqCst));
+    }
+
+    pub(crate) fn set_forced_active(&mut self, forced: bool) {
+        self.forced_active = forced;
     }
 
     pub(crate) fn is_enabled(&self) -> bool {

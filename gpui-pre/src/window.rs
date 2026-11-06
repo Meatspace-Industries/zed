@@ -7480,6 +7480,14 @@ impl Window {
         self.a11y.is_active()
     }
 
+    /// Builds the accessibility tree each frame even when no assistive technology is connected,
+    /// so tools can read it with [`Self::debug_a11y_tree_json`]. The platform adapter still
+    /// receives updates only while assistive technology is connected.
+    pub fn force_a11y_active(&mut self, forced: bool) {
+        self.a11y.set_forced_active(forced);
+        self.refresh();
+    }
+
     /// Debug representation of the last frame's accessibility information.
     pub fn debug_a11y_tree_json(&self) -> Option<String> {
         self.a11y.debug_tree_json()
