@@ -564,11 +564,29 @@ impl ListState {
             state.follow_state.stop_following();
         }
 
+        // The furthest scroll top, as `scroll` computes it. A bottom-aligned list at its end
+        // anchors to the end marker, whose offset is the whole content height; starting there
+        // would spend the first viewport height of an upward scroll without moving.
+        let scroll_max = state.last_layout_bounds.map(|bounds| {
+            let padding = state.last_padding.unwrap_or_default();
+            (state.items.summary().height + padding.top + padding.bottom - bounds.size.height)
+                .max(px(0.))
+        });
+
         let mut cursor = state.items.cursor::<ListItemSummary>(());
         cursor.seek(&Count(current_offset.item_ix), Bias::Right);
 
-        let start_pixel_offset = cursor.start().height + current_offset.offset_in_item;
-        let new_pixel_offset = (start_pixel_offset + distance).max(px(0.));
+        let mut start_pixel_offset = cursor.start().height + current_offset.offset_in_item;
+        let mut new_pixel_offset = (start_pixel_offset + distance).max(px(0.));
+        if let Some(scroll_max) = scroll_max {
+            start_pixel_offset = start_pixel_offset.min(scroll_max);
+            new_pixel_offset = (start_pixel_offset + distance).max(px(0.)).min(scroll_max);
+            if state.alignment == ListAlignment::Bottom && new_pixel_offset == scroll_max {
+                drop(cursor);
+                state.set_scroll_anchor(None);
+                return;
+            }
+        }
         if new_pixel_offset > start_pixel_offset {
             cursor.seek_forward(&Height(new_pixel_offset), Bias::Right);
         } else {
