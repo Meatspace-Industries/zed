@@ -3608,6 +3608,12 @@ impl Window {
         self.mouse_position
     }
 
+    /// The hitboxes at `position` in the last drawn frame, topmost first. As in mouse dispatch,
+    /// the list stops at the first hitbox that blocks the mouse.
+    pub fn hit_test(&self, position: Point<Pixels>) -> Vec<HitboxId> {
+        self.rendered_frame.hit_test(position).ids.into_vec()
+    }
+
     /// Captures the pointer for the given hitbox. While captured, all mouse move and mouse up
     /// events will be routed to listeners that check this hitbox's `is_hovered` status,
     /// regardless of actual hit testing. This enables drag operations that continue
