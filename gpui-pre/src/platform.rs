@@ -2964,6 +2964,20 @@ pub enum TextRenderingMode {
     Grayscale,
 }
 
+/// A file panel request, as given to a hook set with [`App::set_path_prompt_hook`].
+#[derive(Debug, Clone)]
+pub enum PathPrompt {
+    /// The app asked for existing paths.
+    Open(PathPromptOptions),
+    /// The app asked for a path to save to.
+    Save {
+        /// The folder the panel would open in.
+        directory: std::path::PathBuf,
+        /// The file name the app suggested.
+        suggested_name: Option<String>,
+    },
+}
+
 /// The options that can be configured for a file dialog prompt
 #[derive(Clone, Debug)]
 pub struct PathPromptOptions {
