@@ -3,8 +3,11 @@ use anyhow::{Context as _, Result};
 use async_tungstenite::tungstenite::Message;
 use dioxus_devtools_types::DevserverMsg;
 use futures::StreamExt;
-use std::net::SocketAddr;
+use std::{net::SocketAddr, time::Duration};
 use subsecond::JumpTable;
+
+/// How long to wait before reconnecting to the dx development server.
+const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 
 struct HotReload {
     _task: Task<()>,
@@ -34,9 +37,29 @@ pub(crate) fn init(cx: &mut App) {
     let endpoint =
         format!("{endpoint}?aslr_reference={reference}&build_id={build_id}&pid={process_id}");
     let (sender, receiver) = async_channel::bounded(16);
+    let executor = cx.background_executor().clone();
+    // The dx server can drop the websocket, for example while it rebuilds. Reconnect until the
+    // app stops listening for patches, and log only the first failure of each outage.
     let connection = cx.background_spawn(async move {
-        if let Err(error) = receive_patches(address, endpoint, build_id, process_id, sender).await {
-            log::error!("GPUI hot reload disconnected: {error:#}. Restart dx serve to reconnect.");
+        let mut reported = false;
+        while !sender.is_closed() {
+            let result = receive_patches(
+                address,
+                endpoint.clone(),
+                build_id,
+                process_id,
+                sender.clone(),
+            )
+            .await;
+            match result {
+                Ok(()) => reported = false,
+                Err(error) if !reported => {
+                    log::warn!("GPUI hot reload disconnected: {error:#}. Reconnecting.");
+                    reported = true;
+                }
+                Err(error) => log::debug!("GPUI hot reload is still disconnected: {error:#}"),
+            }
+            executor.timer(RECONNECT_DELAY).await;
         }
     });
     let task = cx.spawn(async move |cx| {
