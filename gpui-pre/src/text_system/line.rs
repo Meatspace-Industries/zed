@@ -3,6 +3,7 @@ use crate::{
     SharedString, StrikethroughStyle, TextAlign, UnderlineStyle, Window, WrapBoundary,
     WrappedLineLayout, black, fill, point, px, size, underline_y_offset,
 };
+use super::bidi;
 use derive_more::{Deref, DerefMut};
 use smallvec::SmallVec;
 use std::{ops::Range, sync::Arc};
@@ -150,7 +151,7 @@ impl ShapedLine {
             origin,
             &self.layout,
             line_height,
-            align,
+            self.resolve_align(align),
             align_width,
             &self.decoration_runs,
             &[],
@@ -174,7 +175,7 @@ impl ShapedLine {
             origin,
             &self.layout,
             line_height,
-            align,
+            self.resolve_align(align),
             align_width,
             &self.decoration_runs,
             &[],
@@ -183,6 +184,19 @@ impl ShapedLine {
         )?;
 
         Ok(())
+    }
+
+    /// `align` with [`TextAlign::Start`] resolved for the line's direction (UAX #9 P2 and P3).
+    pub fn resolve_align(&self, align: TextAlign) -> TextAlign {
+        match align {
+            TextAlign::Start
+                if bidi::has_rtl(&self.text) && bidi::paragraph_is_rtl(&self.text) =>
+            {
+                TextAlign::Right
+            }
+            TextAlign::Start => TextAlign::Left,
+            align => align,
+        }
     }
 
     /// Split this shaped line at a byte index, returning `(prefix, suffix)`.
@@ -485,7 +499,7 @@ impl WrappedLine {
             origin,
             &self.layout.unwrapped_layout,
             line_height,
-            align,
+            self.layout.resolve_align(align),
             align_width,
             &self.decoration_runs,
             &self.wrap_boundaries,
@@ -516,7 +530,7 @@ impl WrappedLine {
             origin,
             &self.layout.unwrapped_layout,
             line_height,
-            align,
+            self.layout.resolve_align(align),
             align_width,
             &self.decoration_runs,
             &self.wrap_boundaries,
@@ -1228,7 +1242,7 @@ fn line_paint_bounds(
             line_height * (wrap_boundaries.len() as f32 + 1.),
         ),
     );
-    if align == TextAlign::Left || layout.len == 0 {
+    if matches!(align, TextAlign::Left | TextAlign::Start) || layout.len == 0 {
         return bounds;
     }
 
@@ -1245,7 +1259,7 @@ fn line_paint_bounds(
     for (row, row_end) in row_ends.enumerate() {
         let width = row_end - row_start;
         let offset = match align {
-            TextAlign::Left => Pixels::ZERO,
+            TextAlign::Left | TextAlign::Start => Pixels::ZERO,
             TextAlign::Center => (align_width - width) / 2.,
             TextAlign::Right => align_width - width,
         };
@@ -1275,7 +1289,7 @@ fn aligned_origin_x(
     let line_width = end_of_line - last_glyph_x;
 
     match align {
-        TextAlign::Left => origin.x,
+        TextAlign::Left | TextAlign::Start => origin.x,
         TextAlign::Center => (origin.x * 2.0 + align_width - line_width) / 2.0,
         TextAlign::Right => origin.x + align_width - line_width,
     }
@@ -1655,6 +1669,7 @@ mod tests {
                         }]),
                         wrap_width: Some(px(16.)),
                         line_starts: SmallVec::new(),
+                        rtl: false,
                     }),
                     text: line.text,
                     decoration_runs: line.decoration_runs.into_vec(),

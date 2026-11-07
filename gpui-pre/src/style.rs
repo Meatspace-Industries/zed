@@ -430,6 +430,11 @@ pub enum TextAlign {
 
     /// Align the text to the right of the element
     Right,
+
+    /// Align each paragraph to its start: the left of a left-to-right paragraph, the right of a
+    /// right-to-left one (UAX #9 P2 and P3), as CSS `text-align: start` does for a paragraph
+    /// with its own direction. A bare [`crate::LineLayout`] has no text, so it aligns left.
+    Start,
 }
 
 /// The properties that can be used to style text in GPUI

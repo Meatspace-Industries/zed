@@ -1,6 +1,6 @@
 use crate::{
-    Bounds, FontId, GlyphId, Pixels, PlatformTextSystem, Point, SharedString, Size, point, px,
-    size,
+    Bounds, FontId, GlyphId, Pixels, PlatformTextSystem, Point, SharedString, Size, TextAlign,
+    point, px, size,
 };
 use collections::{FxHashMap, FxHashSet};
 use itertools::Itertools;
@@ -344,6 +344,9 @@ pub struct WrappedLineLayout {
     /// glyphs follow one another in the unwrapped layout but their indices are not in order.
     /// Empty for other text.
     pub(crate) line_starts: SmallVec<[usize; 1]>,
+
+    /// Whether the paragraph reads right to left (UAX #9 P2 and P3).
+    pub(crate) rtl: bool,
 }
 
 /// A boundary at which a line was wrapped
@@ -356,6 +359,50 @@ pub struct WrapBoundary {
 }
 
 impl WrappedLineLayout {
+    /// Whether the paragraph reads right to left (UAX #9 P2 and P3): its first strong character
+    /// does.
+    pub fn is_rtl(&self) -> bool {
+        self.rtl
+    }
+
+    /// `align` with [`TextAlign::Start`] resolved for this paragraph's direction.
+    pub fn resolve_align(&self, align: TextAlign) -> TextAlign {
+        match align {
+            TextAlign::Start if self.rtl => TextAlign::Right,
+            TextAlign::Start => TextAlign::Left,
+            align => align,
+        }
+    }
+
+    /// The x at which visual line `line` starts when the line paints with `align` in
+    /// `align_width` (by default, the wrap width), relative to the paint origin. Positions from
+    /// this layout (carets, selection spans, hit tests) are relative to the line's own start,
+    /// so a caller that aligns adds this offset.
+    pub fn aligned_line_x(
+        &self,
+        line: usize,
+        align: TextAlign,
+        align_width: Option<Pixels>,
+    ) -> Pixels {
+        let layout = &self.unwrapped_layout;
+        let glyph_x = |boundary: &WrapBoundary| {
+            layout.runs[boundary.run_ix].glyphs[boundary.glyph_ix]
+                .position
+                .x
+        };
+        let start = line
+            .checked_sub(1)
+            .and_then(|previous| self.wrap_boundaries.get(previous))
+            .map_or(px(0.), glyph_x);
+        let end = self.wrap_boundaries.get(line).map_or(layout.width, glyph_x);
+        let width = align_width.or(self.wrap_width).unwrap_or(layout.width);
+        match self.resolve_align(align) {
+            TextAlign::Center => (width - (end - start)) / 2.,
+            TextAlign::Right => width - (end - start),
+            TextAlign::Left | TextAlign::Start => px(0.),
+        }
+    }
+
     /// The length of the underlying text, in utf8 bytes.
     #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {
@@ -807,6 +854,7 @@ impl LineLayoutCache {
                     wrap_boundaries,
                     wrap_width,
                     line_starts: SmallVec::new(),
+                    rtl: false,
                 })
             };
             let key = Arc::new(CacheKey {
@@ -919,11 +967,13 @@ impl LineLayoutCache {
         wrap_width: Option<Pixels>,
         max_lines: Option<usize>,
     ) -> WrappedLineLayout {
+        let rtl = bidi::paragraph_is_rtl(text);
         let single = |unwrapped_layout| WrappedLineLayout {
             unwrapped_layout,
             wrap_boundaries: SmallVec::new(),
             wrap_width,
             line_starts: SmallVec::from_buf([0]),
+            rtl,
         };
         let Some(wrap_width) = wrap_width.filter(|width| unwrapped.width > *width) else {
             return single(unwrapped);
@@ -938,7 +988,6 @@ impl LineLayoutCache {
         if lines.len() < 2 {
             return single(unwrapped);
         }
-        let rtl = bidi::paragraph_is_rtl(text);
         let mut combined = LineLayout {
             font_size,
             width: px(0.),
@@ -992,6 +1041,7 @@ impl LineLayoutCache {
             wrap_boundaries,
             wrap_width: Some(wrap_width),
             line_starts,
+            rtl,
         }
     }
 
