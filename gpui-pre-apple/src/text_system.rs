@@ -162,7 +162,14 @@ impl PlatformTextSystem for AppleTextSystem {
 
             let candidate_properties = candidates
                 .iter()
-                .map(|font_id| lock.fonts[font_id.0].properties())
+                .map(|font_id| {
+                    let font = &lock.fonts[font_id.0];
+                    let mut properties = font.properties();
+                    if let Some(weight) = css_weight(font) {
+                        properties.weight = weight;
+                    }
+                    properties
+                })
                 .collect::<SmallVec<[_; 4]>>();
 
             let ix = font_kit::matching::find_best_match(
@@ -174,10 +181,17 @@ impl PlatformTextSystem for AppleTextSystem {
                 },
             )?;
 
+            // A face of the requested weight draws as it is, as AppKit draws the system UI font's
+            // named instances (its Medium face is wght 510). Another face of a variable font is
+            // instanced at the requested weight.
             let font_id = candidates[ix];
-            let font_id = lock
-                .weight_instance(font_id, font.weight)
-                .unwrap_or(font_id);
+            let exact = (candidate_properties[ix].weight.0 - font.weight.0).abs() < 0.5;
+            let font_id = if exact {
+                font_id
+            } else {
+                lock.weight_instance(font_id, font.weight)
+                    .unwrap_or(font_id)
+            };
             lock.font_selections.insert(font.clone(), font_id);
             Ok(font_id)
         }
@@ -875,6 +889,27 @@ fn bounds_from_rect_i(rect: RectI) -> Bounds<DevicePixels> {
 
 fn size_from_vector2f(vec: Vector2F) -> Size<f32> {
     size(vec.x(), vec.y())
+}
+
+/// A face's CSS weight from its CoreText weight trait, through the `NSFontWeight` constants
+/// (ultra light -0.8 is 100, regular 0 is 400, medium 0.23 is 500, black 0.62 is 900), which is
+/// how CoreText derives the trait from a face's OS/2 weight class. font-kit maps the trait with
+/// another table, which puts the system UI font's Medium face at 530 and its Heavy face at 780,
+/// so CSS matching drew weight 500 with the Regular face.
+fn css_weight(font: &FontKitFont) -> Option<FontkitWeight> {
+    const NS_FONT_WEIGHTS: [f64; 9] = [-0.8, -0.6, -0.4, 0.0, 0.23, 0.3, 0.4, 0.56, 0.62];
+    let traits = font.native_font().all_traits();
+    let trait_value = unsafe { traits.get(kCTFontWeightTrait) }
+        .downcast::<CFNumber>()?
+        .to_f64()?;
+    let upper = NS_FONT_WEIGHTS
+        .iter()
+        .position(|weight| trait_value <= *weight)
+        .unwrap_or(NS_FONT_WEIGHTS.len() - 1)
+        .max(1);
+    let (low, high) = (NS_FONT_WEIGHTS[upper - 1], NS_FONT_WEIGHTS[upper]);
+    let step = ((trait_value - low) / (high - low)).clamp(0.0, 1.0);
+    Some(FontkitWeight(((upper as f64 + step) * 100.0) as f32))
 }
 
 fn fontkit_weight(value: FontWeight) -> FontkitWeight {
