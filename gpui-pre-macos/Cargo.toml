@@ -37,10 +37,6 @@ bench-support = [
     "gpui_apple/bench-support",
 ]
 default = ["gpui/default"]
-devtools = [
-    "gpui/devtools",
-    "gpui_apple/devtools",
-]
 font-kit = ["gpui_apple/font-kit"]
 runtime_shaders = ["gpui_apple/runtime_shaders"]
 screen-capture = [

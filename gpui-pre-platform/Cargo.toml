@@ -38,11 +38,6 @@ bench-support = [
     "gpui_wgpu/bench-support",
 ]
 default = ["multithreaded"]
-devtools = [
-    "gpui/devtools",
-    "gpui_macos/devtools",
-    "gpui_windows/devtools",
-]
 font-kit = ["gpui_macos/font-kit"]
 inspector = ["gpui/inspector"]
 multithreaded = ["gpui_web/multithreaded"]
