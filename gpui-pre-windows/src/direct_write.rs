@@ -556,6 +556,8 @@ impl DirectWriteState {
                     segment_runs.push(FontRun {
                         len,
                         font_id: run.font_id,
+                        font_size: run.font_size,
+                        padding: run.padding,
                     });
                 }
                 remaining_bytes -= len;
@@ -645,8 +647,9 @@ impl DirectWriteState {
                 layout.SetTypography(&font_info.features, text_range)?;
                 utf16_offset += current_text_utf16_length;
 
-                layout
+                (layout, text_range)
             };
+            let (text_layout, first_range) = text_layout;
 
             let (ascent, descent) = {
                 let mut first_metrics = [DWRITE_LINE_METRICS::default(); 4];
@@ -657,6 +660,11 @@ impl DirectWriteState {
                     px(first_metrics[0].height - first_metrics[0].baseline),
                 )
             };
+            // The line's metrics are those of its own size, which a run with a smaller size of
+            // its own (inline code) stays within.
+            if let Some(size) = font_runs[0].font_size {
+                text_layout.SetFontSize(size.as_f32(), first_range)?;
+            }
             let mut break_ligatures = true;
             for run in &font_runs[1..] {
                 let font_info = &self.fonts[run.font_id.0];
@@ -672,10 +680,11 @@ impl DirectWriteState {
                 utf16_offset += current_text_utf16_length;
                 text_layout.SetFontCollection(collection, text_range)?;
                 text_layout.SetFontFamilyName(&font_info.font_family_h, text_range)?;
+                let run_size = run.font_size.unwrap_or(font_size).as_f32();
                 let font_size = if break_ligatures {
-                    font_size.as_f32().next_up()
+                    run_size.next_up()
                 } else {
-                    font_size.as_f32()
+                    run_size
                 };
                 text_layout.SetFontSize(font_size, text_range)?;
                 text_layout.SetFontStyle(font_info.font_face.GetStyle(), text_range)?;
@@ -1691,6 +1700,7 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
             font_id,
             glyphs,
             is_rtl: false,
+            font_size: None,
         });
         Ok(())
     }

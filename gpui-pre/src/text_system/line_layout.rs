@@ -46,6 +46,9 @@ pub struct ShapedRun {
     /// visual order, so their indices decrease. GPUI sets it after shaping; a platform text
     /// system leaves it false.
     pub is_rtl: bool,
+    /// The run's own font size, from a [`crate::TextRun`] that set one. `None` draws at the
+    /// line's size. GPUI sets it after shaping; a platform text system leaves it `None`.
+    pub font_size: Option<Pixels>,
 }
 
 /// A single glyph, ready to paint.
@@ -179,6 +182,7 @@ impl LineLayout {
                     font_id: run.font_id,
                     glyphs: run.glyphs[..split_pos].to_vec(),
                     is_rtl: run.is_rtl,
+                    font_size: run.font_size,
                 });
             }
 
@@ -196,6 +200,7 @@ impl LineLayout {
                     font_id: run.font_id,
                     glyphs: right_glyphs,
                     is_rtl: run.is_rtl,
+                    font_size: run.font_size,
                 });
             }
         }
@@ -884,14 +889,19 @@ impl LineLayoutCache {
     /// direction (UAX #9 P2 and P3), and its runs record their directions.
     fn shape(&self, text: &str, font_size: Pixels, runs: &[FontRun]) -> LineLayout {
         if !bidi::has_rtl(text) {
-            return self
+            let mut layout = self
                 .platform_text_system
                 .layout_line(text, font_size, runs);
+            apply_run_sizes(&mut layout, runs);
+            apply_run_padding(&mut layout, runs);
+            return layout;
         }
         let rtl = bidi::paragraph_is_rtl(text);
         let mut layout = self
             .platform_text_system
             .layout_line_in_direction(text, font_size, runs, rtl);
+        apply_run_sizes(&mut layout, runs);
+        apply_run_padding(&mut layout, runs);
         bidi::mark_run_directions(&mut layout, text, rtl);
         layout
     }
@@ -952,6 +962,8 @@ impl LineLayoutCache {
                 &line_runs,
                 rtl,
             );
+            apply_run_sizes(&mut line, &line_runs);
+            apply_run_padding(&mut line, &line_runs);
             bidi::mark_run_directions(&mut line, line_text, rtl);
             if line.runs.iter().all(|run| run.glyphs.is_empty()) {
                 continue;
@@ -1031,12 +1043,107 @@ fn apply_force_width_to_layout(layout: &mut LineLayout, force_width: Pixels) {
     }
 }
 
+/// Gives each shaped run the size of the text runs that its glyphs come from, and splits a
+/// shaped run where that size changes: the shaper merges adjacent glyphs of one font. Platforms
+/// shape each [`FontRun`] at its own size, so only painting needs this.
+fn apply_run_sizes(layout: &mut LineLayout, runs: &[FontRun]) {
+    if runs.iter().all(|run| run.font_size.is_none()) {
+        return;
+    }
+    let mut ends = SmallVec::<[(usize, Option<Pixels>); 8]>::new();
+    let mut end = 0;
+    for run in runs {
+        end += run.len;
+        ends.push((end, run.font_size));
+    }
+    let size_at = |index: usize| {
+        let run = ends.partition_point(|(end, _)| *end <= index);
+        ends.get(run).and_then(|(_, size)| *size)
+    };
+    let mut sized: Vec<ShapedRun> = Vec::with_capacity(layout.runs.len());
+    for run in layout.runs.drain(..) {
+        let mut current: Option<ShapedRun> = None;
+        for glyph in run.glyphs {
+            let font_size = size_at(glyph.index);
+            match &mut current {
+                Some(current) if current.font_size == font_size => current.glyphs.push(glyph),
+                _ => {
+                    sized.extend(current.take());
+                    current = Some(ShapedRun {
+                        font_id: run.font_id,
+                        glyphs: vec![glyph],
+                        is_rtl: run.is_rtl,
+                        font_size,
+                    });
+                }
+            }
+        }
+        sized.extend(current);
+    }
+    layout.runs = sized;
+}
+
+/// Spaces the glyphs of each padded box ([`crate::TextRun::padding`]): its padding goes before
+/// the box's first glyph and after its last, in visual order, so a box that a direction change
+/// or a wrap splits is padded where each piece starts and ends on screen. The line widens by
+/// all of its padding, so wrapping and alignment see it.
+fn apply_run_padding(layout: &mut LineLayout, runs: &[FontRun]) {
+    if runs.iter().all(|run| run.padding.is_none()) {
+        return;
+    }
+    // Each run's end and its box: adjacent runs with the same padding are one box.
+    let mut ends = SmallVec::<[(usize, Option<(usize, Pixels)>); 8]>::new();
+    let mut end = 0;
+    let mut boxes = 0;
+    let mut previous: Option<Pixels> = None;
+    for run in runs {
+        end += run.len;
+        let padded = run.padding.map(|padding| {
+            if previous != Some(padding) {
+                boxes += 1;
+            }
+            (boxes, padding)
+        });
+        previous = run.padding;
+        ends.push((end, padded));
+    }
+    let box_at = |index: usize| {
+        let run = ends.partition_point(|(end, _)| *end <= index);
+        ends.get(run).and_then(|(_, padded)| *padded)
+    };
+    let mut shift = px(0.);
+    let mut current: Option<(usize, Pixels)> = None;
+    for run in &mut layout.runs {
+        for glyph in &mut run.glyphs {
+            let padded = box_at(glyph.index);
+            if padded.map(|(id, _)| id) != current.map(|(id, _)| id) {
+                if let Some((_, padding)) = current {
+                    shift += padding;
+                }
+                if let Some((_, padding)) = padded {
+                    shift += padding;
+                }
+                current = padded;
+            }
+            glyph.position.x += shift;
+        }
+    }
+    if let Some((_, padding)) = current {
+        shift += padding;
+    }
+    layout.width += shift;
+}
+
 /// A run of text with a single font.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 #[expect(missing_docs)]
 pub struct FontRun {
     pub len: usize,
     pub font_id: FontId,
+    /// The run's own size; `None` uses the line's size.
+    pub font_size: Option<Pixels>,
+    /// The run's inline padding ([`crate::TextRun::padding`]).
+    pub padding: Option<Pixels>,
 }
 
 trait AsCacheKeyRef {
@@ -1135,6 +1242,7 @@ mod tests {
                 font_id: FontId(0),
                 glyphs,
                 is_rtl: false,
+                font_size: None,
             }],
             len: 0,
         }

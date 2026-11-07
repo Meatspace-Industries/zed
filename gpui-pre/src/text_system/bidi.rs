@@ -57,6 +57,7 @@ pub(crate) fn mark_run_directions(layout: &mut LineLayout, text: &str, rtl: bool
                         font_id: run.font_id,
                         glyphs: vec![glyph],
                         is_rtl: glyph_rtl,
+                        font_size: run.font_size,
                     });
                 }
             }
@@ -77,6 +78,8 @@ pub(crate) fn runs_in(runs: &[FontRun], range: Range<usize>) -> SmallVec<[FontRu
             sliced.push(FontRun {
                 len: overlap.end - overlap.start,
                 font_id: run.font_id,
+                font_size: run.font_size,
+                padding: run.padding,
             });
         }
         start = end;

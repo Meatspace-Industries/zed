@@ -319,6 +319,7 @@ impl<'a> ShapedLineCursor<'a> {
             if start < end {
                 runs.push(crate::ShapedRun {
                     is_rtl: run.is_rtl,
+                    font_size: run.font_size,
                     font_id: run.font_id,
                     glyphs: run.glyphs[start..end]
                         .iter()
@@ -595,7 +596,8 @@ fn paint_line(
         let mut max_glyph_size = size(px(0.), px(0.));
         let mut first_glyph_x = origin.x;
         for (run_ix, run) in layout.runs.iter().enumerate() {
-            max_glyph_size = text_system.bounding_box(run.font_id, layout.font_size).size;
+            let font_size = run.font_size.unwrap_or(layout.font_size);
+            max_glyph_size = text_system.bounding_box(run.font_id, font_size).size;
 
             for (glyph_ix, glyph) in run.glyphs.iter().enumerate() {
                 glyph_origin.x += glyph.position.x - prev_glyph_position.x;
@@ -761,14 +763,14 @@ fn paint_line(
                             glyph_origin + baseline_offset + vertical_offset,
                             run.font_id,
                             glyph.id,
-                            layout.font_size,
+                            font_size,
                         )?;
                     } else {
                         window.paint_glyph(
                             glyph_origin + baseline_offset + vertical_offset,
                             run.font_id,
                             glyph.id,
-                            layout.font_size,
+                            font_size,
                             color,
                         )?;
                     }
@@ -868,7 +870,8 @@ fn paint_line_background(
         let mut prev_glyph_position = Point::default();
         let mut max_glyph_size = size(px(0.), px(0.));
         for (run_ix, run) in layout.runs.iter().enumerate() {
-            max_glyph_size = text_system.bounding_box(run.font_id, layout.font_size).size;
+            let font_size = run.font_size.unwrap_or(layout.font_size);
+            max_glyph_size = text_system.bounding_box(run.font_id, font_size).size;
 
             for (glyph_ix, glyph) in run.glyphs.iter().enumerate() {
                 glyph_origin.x += glyph.position.x - prev_glyph_position.x;
@@ -1178,7 +1181,8 @@ fn paint_bidi_line(
                 );
                 let color = style.map_or(black(), |style| style.color);
                 let glyph_origin = point(left, line_y);
-                let max_glyph_size = text_system.bounding_box(run.font_id, layout.font_size).size;
+                let font_size = run.font_size.unwrap_or(layout.font_size);
+                let max_glyph_size = text_system.bounding_box(run.font_id, font_size).size;
                 let max_glyph_bounds = Bounds {
                     origin: glyph_origin,
                     size: max_glyph_size,
@@ -1190,14 +1194,14 @@ fn paint_bidi_line(
                             glyph_origin + baseline_offset + vertical_offset,
                             run.font_id,
                             glyph.id,
-                            layout.font_size,
+                            font_size,
                         )?;
                     } else {
                         window.paint_glyph(
                             glyph_origin + baseline_offset + vertical_offset,
                             run.font_id,
                             glyph.id,
-                            layout.font_size,
+                            font_size,
                             color,
                         )?;
                     }
@@ -1313,6 +1317,7 @@ mod tests {
                 runs: vec![ShapedRun {
                     font_id: FontId(0),
                     is_rtl: false,
+                    font_size: None,
                     glyphs: shaped_glyphs,
                 }],
                 len: text.len(),
@@ -1762,6 +1767,7 @@ mod tests {
                     ShapedRun {
                         font_id: FontId(0),
                         is_rtl: false,
+                        font_size: None,
                         glyphs: vec![
                             ShapedGlyph {
                                 id: GlyphId(0),
@@ -1786,6 +1792,7 @@ mod tests {
                     ShapedRun {
                         font_id: FontId(1),
                         is_rtl: false,
+                        font_size: None,
                         glyphs: vec![
                             ShapedGlyph {
                                 id: GlyphId(0),
@@ -2010,6 +2017,7 @@ mod tests {
                     ShapedRun {
                         font_id: FontId(3),
                         is_rtl: false,
+                        font_size: None,
                         glyphs: vec![
                             ShapedGlyph {
                                 id: GlyphId(11),
@@ -2034,6 +2042,7 @@ mod tests {
                     ShapedRun {
                         font_id: FontId(8),
                         is_rtl: false,
+                        font_size: None,
                         glyphs: vec![
                             ShapedGlyph {
                                 id: GlyphId(21),

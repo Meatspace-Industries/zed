@@ -570,6 +570,8 @@ impl TextStyle {
             background_color: self.background_color,
             underline: self.underline,
             strikethrough: self.strikethrough,
+            font_size: None,
+            padding: None,
         }
     }
 }

@@ -424,6 +424,8 @@ impl TextSystem {
                 &[FontRun {
                     len: buffer.len(),
                     font_id,
+                    font_size: None,
+                    padding: None,
                 }],
             )
             .width
@@ -764,6 +766,8 @@ impl WindowTextSystem {
                 let font_id = self.resolve_font(&run.font);
                 if let Some(font_run) = font_runs.last_mut()
                     && font_id == font_run.font_id
+                    && font_run.font_size == run.font_size
+                    && font_run.padding == run.padding
                     && !decoration_changed
                 {
                     font_run.len += run_len_within_line;
@@ -771,6 +775,8 @@ impl WindowTextSystem {
                     font_runs.push(FontRun {
                         len: run_len_within_line,
                         font_id,
+                        font_size: run.font_size,
+                        padding: run.padding,
                     });
                 }
 
@@ -878,6 +884,8 @@ impl WindowTextSystem {
             let font_id = self.resolve_font(&run.font);
             if let Some(font_run) = font_runs.last_mut()
                 && font_id == font_run.font_id
+                && font_run.font_size == run.font_size
+                && font_run.padding == run.padding
                 && !decoration_changed
             {
                 font_run.len += run.len;
@@ -885,6 +893,8 @@ impl WindowTextSystem {
                 font_runs.push(FontRun {
                     len: run.len,
                     font_id,
+                    font_size: run.font_size,
+                    padding: run.padding,
                 });
             }
         }
@@ -912,6 +922,8 @@ impl WindowTextSystem {
                 &[FontRun {
                     len: buffer.len(),
                     font_id,
+                    font_size: None,
+                    padding: None,
                 }],
                 None,
             )
@@ -1081,6 +1093,14 @@ pub struct TextRun {
     pub underline: Option<UnderlineStyle>,
     /// The strikethrough style (if any)
     pub strikethrough: Option<StrikethroughStyle>,
+    /// The run's own font size, such as inline code at 0.85em. `None` uses the size that the
+    /// text is shaped at. The run shares the line's baseline, and the line's ascent and descent
+    /// cover every run.
+    pub font_size: Option<Pixels>,
+    /// Space on both sides of the run, as CSS `padding-inline` on an inline box such as a
+    /// mention pill. Adjacent runs with the same padding form one box, padded only at its two
+    /// ends. GPUI only spaces the glyphs; the caller paints the box.
+    pub padding: Option<Pixels>,
 }
 
 #[cfg(all(target_os = "macos", test))]
