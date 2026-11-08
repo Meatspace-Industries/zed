@@ -15,6 +15,7 @@ use std::{
         atomic::{AtomicUsize, Ordering},
     },
 };
+use unicode_segmentation::UnicodeSegmentation;
 
 use super::{LineWrapper, bidi};
 
@@ -942,6 +943,7 @@ impl LineLayoutCache {
                 .layout_line(text, font_size, runs);
             apply_run_sizes(&mut layout, runs);
             apply_run_padding(&mut layout, runs);
+            apply_letter_spacing(&mut layout, text, runs);
             return layout;
         }
         let rtl = bidi::paragraph_is_rtl(text);
@@ -950,6 +952,7 @@ impl LineLayoutCache {
             .layout_line_in_direction(text, font_size, runs, rtl);
         apply_run_sizes(&mut layout, runs);
         apply_run_padding(&mut layout, runs);
+        apply_letter_spacing(&mut layout, text, runs);
         bidi::mark_run_directions(&mut layout, text, rtl);
         layout
     }
@@ -1013,6 +1016,7 @@ impl LineLayoutCache {
             );
             apply_run_sizes(&mut line, &line_runs);
             apply_run_padding(&mut line, &line_runs);
+            apply_letter_spacing(&mut line, line_text, &line_runs);
             bidi::mark_run_directions(&mut line, line_text, rtl);
             if line.runs.iter().all(|run| run.glyphs.is_empty()) {
                 continue;
@@ -1184,6 +1188,58 @@ fn apply_run_padding(layout: &mut LineLayout, runs: &[FontRun]) {
     layout.width += shift;
 }
 
+/// Spaces the characters of each run with letter spacing ([`crate::TextRun::letter_spacing`])
+/// as Chromium does: the spacing follows each grapheme cluster, the line's last too, except a
+/// zero-width character and a letter of a cursive script such as Arabic, whose spaces still
+/// take it. The line widens by all of its spacing, so wrapping and alignment see it.
+fn apply_letter_spacing(layout: &mut LineLayout, text: &str, runs: &[FontRun]) {
+    if runs.iter().all(|run| run.letter_spacing.is_none()) {
+        return;
+    }
+    let mut ends = SmallVec::<[(usize, Option<Pixels>); 8]>::new();
+    let mut end = 0;
+    for run in runs {
+        end += run.len;
+        ends.push((end, run.letter_spacing));
+    }
+    let clusters = text
+        .grapheme_indices(true)
+        .map(|(index, _)| index)
+        .collect::<SmallVec<[usize; 64]>>();
+    let spacing_after = |cluster: usize| {
+        let run = ends.partition_point(|(end, _)| *end <= cluster);
+        let spacing = ends.get(run).and_then(|(_, spacing)| *spacing)?;
+        let character = text[cluster..].chars().next()?;
+        let zero_width = matches!(character as u32,
+            0..0x20 | 0x7f..0xa0 | 0xad | 0x200b..=0x200f | 0x202a..=0x202e | 0xfeff | 0xfffc);
+        let cursive = !character.is_whitespace()
+            && matches!(character as u32,
+                0x0600..=0x08ff | 0x1800..=0x18af | 0xa840..=0xa87f | 0xfb50..=0xfdff
+                    | 0xfe70..=0xfeff | 0x10d00..=0x10d3f | 0x1e900..=0x1e95f);
+        (!zero_width && !cursive).then_some(spacing)
+    };
+    let mut shift = px(0.);
+    let mut current: Option<(usize, Option<Pixels>)> = None;
+    for run in &mut layout.runs {
+        for glyph in &mut run.glyphs {
+            let cluster = clusters[clusters
+                .partition_point(|start| *start <= glyph.index)
+                .saturating_sub(1)];
+            if current.map(|(start, _)| start) != Some(cluster) {
+                if let Some((_, Some(spacing))) = current {
+                    shift += spacing;
+                }
+                current = Some((cluster, spacing_after(cluster)));
+            }
+            glyph.position.x += shift;
+        }
+    }
+    if let Some((_, Some(spacing))) = current {
+        shift += spacing;
+    }
+    layout.width += shift;
+}
+
 /// A run of text with a single font.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 #[expect(missing_docs)]
@@ -1194,6 +1250,8 @@ pub struct FontRun {
     pub font_size: Option<Pixels>,
     /// The run's inline padding ([`crate::TextRun::padding`]).
     pub padding: Option<Pixels>,
+    /// The run's letter spacing ([`crate::TextRun::letter_spacing`]).
+    pub letter_spacing: Option<Pixels>,
 }
 
 trait AsCacheKeyRef {

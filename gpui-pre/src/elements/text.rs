@@ -1,6 +1,6 @@
 use crate::{
     ActiveTooltip, AnyView, App, Bounds, DispatchPhase, Element, ElementId, GlobalElementId,
-    HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId, IntoElement, LayoutId,
+    HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId, IntoElement, IsZero, LayoutId,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Size, TextOverflow,
     TextRun, TextStyle, TooltipId, TruncateFrom, WhiteSpace, Window, WrappedLine,
     WrappedLineLayout, register_tooltip_mouse_handlers, set_tooltip_on_window,
@@ -646,11 +646,18 @@ impl TextLayout {
                 .to_pixels(font_size.into(), window.rem_size()),
         );
 
-        let runs = if let Some(runs) = runs {
+        let mut runs = if let Some(runs) = runs {
             runs
         } else {
             vec![text_style.to_run(text.len())]
         };
+        // A run without its own letter spacing takes the element's.
+        let letter_spacing = text_style.letter_spacing.to_pixels(window.rem_size());
+        if !letter_spacing.is_zero() {
+            for run in &mut runs {
+                run.letter_spacing.get_or_insert(letter_spacing);
+            }
+        }
         window.request_measured_layout(Default::default(), {
             let element_state = self.clone();
 

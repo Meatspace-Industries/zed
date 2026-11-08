@@ -485,6 +485,11 @@ pub struct TextStyle {
 
     /// The number of lines to display before truncating the text
     pub line_clamp: Option<usize>,
+
+    /// Space after each character, as CSS `letter-spacing`. CSS resolves an `em` value at the
+    /// font size of the element that sets it, and children inherit the length, so give a
+    /// length here.
+    pub letter_spacing: AbsoluteLength,
 }
 
 impl Default for TextStyle {
@@ -506,6 +511,7 @@ impl Default for TextStyle {
             text_overflow: None,
             text_align: TextAlign::default(),
             line_clamp: None,
+            letter_spacing: px(0.).into(),
         }
     }
 }
@@ -577,6 +583,7 @@ impl TextStyle {
             strikethrough: self.strikethrough,
             font_size: None,
             padding: None,
+            letter_spacing: None,
         }
     }
 }

@@ -426,6 +426,7 @@ impl TextSystem {
                     font_id,
                     font_size: None,
                     padding: None,
+                    letter_spacing: None,
                 }],
             )
             .width
@@ -768,6 +769,7 @@ impl WindowTextSystem {
                     && font_id == font_run.font_id
                     && font_run.font_size == run.font_size
                     && font_run.padding == run.padding
+                    && font_run.letter_spacing == run.letter_spacing
                     && !decoration_changed
                 {
                     font_run.len += run_len_within_line;
@@ -777,6 +779,7 @@ impl WindowTextSystem {
                         font_id,
                         font_size: run.font_size,
                         padding: run.padding,
+                        letter_spacing: run.letter_spacing,
                     });
                 }
 
@@ -886,6 +889,7 @@ impl WindowTextSystem {
                 && font_id == font_run.font_id
                 && font_run.font_size == run.font_size
                 && font_run.padding == run.padding
+                && font_run.letter_spacing == run.letter_spacing
                 && !decoration_changed
             {
                 font_run.len += run.len;
@@ -895,6 +899,7 @@ impl WindowTextSystem {
                     font_id,
                     font_size: run.font_size,
                     padding: run.padding,
+                    letter_spacing: run.letter_spacing,
                 });
             }
         }
@@ -924,6 +929,7 @@ impl WindowTextSystem {
                     font_id,
                     font_size: None,
                     padding: None,
+                    letter_spacing: None,
                 }],
                 None,
             )
@@ -1101,6 +1107,9 @@ pub struct TextRun {
     /// mention pill. Adjacent runs with the same padding form one box, padded only at its two
     /// ends. GPUI only spaces the glyphs; the caller paints the box.
     pub padding: Option<Pixels>,
+    /// Space after each character, as CSS `letter-spacing`. `None` takes the text element's
+    /// [`crate::TextStyle::letter_spacing`].
+    pub letter_spacing: Option<Pixels>,
 }
 
 #[cfg(all(target_os = "macos", test))]

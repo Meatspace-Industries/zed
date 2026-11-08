@@ -742,6 +742,16 @@ pub trait Styled: Sized {
         self
     }
 
+    /// Sets the space after each character of this element and its children, as CSS
+    /// `letter-spacing`. For an `em` value, give its length at this element's font size, as
+    /// CSS computes it.
+    ///
+    /// This value cascades to its child elements.
+    fn letter_spacing(mut self, spacing: impl Into<AbsoluteLength>) -> Self {
+        self.text_style().letter_spacing = Some(spacing.into());
+        self
+    }
+
     /// Sets the opacity of this element and its children.
     fn opacity(mut self, opacity: f32) -> Self {
         self.style().opacity = Some(opacity);

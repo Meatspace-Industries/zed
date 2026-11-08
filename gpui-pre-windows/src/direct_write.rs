@@ -558,6 +558,7 @@ impl DirectWriteState {
                         font_id: run.font_id,
                         font_size: run.font_size,
                         padding: run.padding,
+                        letter_spacing: run.letter_spacing,
                     });
                 }
                 remaining_bytes -= len;

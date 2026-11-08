@@ -22,7 +22,7 @@ use core_text::{
         kCTFontVariationAttribute, kCTFontWeightTrait, kCTFontWidthTrait,
     },
     line::CTLine,
-    string_attributes::kCTFontAttributeName,
+    string_attributes::{kCTFontAttributeName, kCTLigatureAttributeName},
 };
 use font_kit::{
     font::Font as FontKitFont,
@@ -682,6 +682,15 @@ impl AppleTextSystemState {
                         kCTFontAttributeName,
                         &font.native_font().clone_with_font_size(font_size.into()),
                     );
+                    // Chromium sets letter-spaced text without optional ligatures, so each
+                    // character takes its own spacing.
+                    if run.letter_spacing.is_some() {
+                        string.set_attribute(
+                            cf_range,
+                            kCTLigatureAttributeName,
+                            &CFNumber::from(0),
+                        );
+                    }
                 }
                 if length > 0 {
                     break_ligature = !break_ligature;
@@ -1008,6 +1017,7 @@ mod tests {
                 len: 6,
                 font_size: None,
                 padding: None,
+                letter_spacing: None,
             }],
         );
         assert_eq!(layout.len, 6);
@@ -1080,7 +1090,7 @@ mod tests {
         let glyphs = |text: &str, runs: &[(FontId, usize)]| -> Vec<GlyphId> {
             let runs = runs
                 .iter()
-                .map(|&(font_id, len)| FontRun { font_id, len, font_size: None, padding: None })
+                .map(|&(font_id, len)| FontRun { font_id, len, font_size: None, padding: None, letter_spacing: None })
                 .collect::<Vec<_>>();
             fonts
                 .layout_line(text, px(16.), &runs)
@@ -1185,8 +1195,8 @@ mod tests {
 
         let text = "hello world";
         let font_runs = &[
-            FontRun { font_id, len: 5, font_size: None, padding: None }, // "hello"
-            FontRun { font_id, len: 6, font_size: None, padding: None }, // " world"
+            FontRun { font_id, len: 5, font_size: None, padding: None, letter_spacing: None }, // "hello"
+            FontRun { font_id, len: 6, font_size: None, padding: None, letter_spacing: None }, // " world"
         ];
 
         let layout = fonts.layout_line(text, px(16.), font_runs);
@@ -1206,13 +1216,14 @@ mod tests {
         // Test with different font runs - should not insert ZWNJ
         let font_id2 = fonts.font_id(&font("Times")).unwrap_or(font_id);
         let font_runs_different = &[
-            FontRun { font_id, len: 5, font_size: None, padding: None }, // "hello"
+            FontRun { font_id, len: 5, font_size: None, padding: None, letter_spacing: None }, // "hello"
             // " world"
             FontRun {
                 font_id: font_id2,
                 len: 6,
                 font_size: None,
                 padding: None,
+                letter_spacing: None,
             },
         ];
 
@@ -1237,15 +1248,15 @@ mod tests {
         let font_id = fonts.font_id(&font("Helvetica")).unwrap();
 
         let text = "hello";
-        let font_runs = &[FontRun { font_id, len: 5, font_size: None, padding: None }];
+        let font_runs = &[FontRun { font_id, len: 5, font_size: None, padding: None, letter_spacing: None }];
         let layout = fonts.layout_line(text, px(16.), font_runs);
         assert_eq!(layout.len, text.len());
 
         let text = "abc";
         let font_runs = &[
-            FontRun { font_id, len: 1, font_size: None, padding: None }, // "a"
-            FontRun { font_id, len: 1, font_size: None, padding: None }, // "b"
-            FontRun { font_id, len: 1, font_size: None, padding: None }, // "c"
+            FontRun { font_id, len: 1, font_size: None, padding: None, letter_spacing: None }, // "a"
+            FontRun { font_id, len: 1, font_size: None, padding: None, letter_spacing: None }, // "b"
+            FontRun { font_id, len: 1, font_size: None, padding: None, letter_spacing: None }, // "c"
         ];
         let layout = fonts.layout_line(text, px(16.), font_runs);
         assert_eq!(layout.len, text.len());
