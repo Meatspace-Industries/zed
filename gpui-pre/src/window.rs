@@ -9,17 +9,17 @@ use crate::taffy::TaffyLayoutEngine;
 use crate::{
     Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext, Arena, Asset,
     AsyncWindowContext, AtlasTile, AvailableSpace, Background, BorderStyle, Bounds, BoxShadow,
-    Capslock, Context, Corners, CursorHideMode, CursorStyle, Decorations, DevicePixels,
-    DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId, Edges, Effect, Entity,
-    EntityId, EventEmitter, FileDropEvent, FontId, Global, GlobalElementId, GlyphId, GpuSpecs,
-    Hsla, InputHandler, InputPreference, IsZero, KeyBinding, KeyContext, KeyDownEvent, KeyEvent,
-    Keystroke, KeystrokeEvent, LayoutId, LineLayoutIndex, Modifiers, ModifiersChangedEvent,
-    MonochromeSprite, MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent, Path, Pixels,
-    PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point,
-    PolychromeSprite, Priority, PromptButton, PromptLevel, Quad, Render, RenderGlyphParams,
-    RenderImage, RenderImageParams, RenderSvgParams, Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR,
-    SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, Shadow, SharedString, Size,
-    StrikethroughStyle, Style, SubpixelSprite, Subscription, SystemWindowTab,
+    Capslock, Context, Corners, CursorHideMode, CursorStyle, DecorationRun, Decorations,
+    DevicePixels, DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId, Edges, Effect,
+    Entity, EntityId, EventEmitter, FileDropEvent, FontId, Global, GlobalElementId, GlyphId,
+    GpuSpecs, Hsla, InputHandler, InputPreference, IsZero, KeyBinding, KeyContext, KeyDownEvent,
+    KeyEvent, Keystroke, KeystrokeEvent, LayoutId, LineLayout, LineLayoutIndex, Modifiers,
+    ModifiersChangedEvent, MonochromeSprite, MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent,
+    Path, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler,
+    PlatformWindow, Point, PolychromeSprite, Priority, PromptButton, PromptLevel, Quad, Render,
+    RenderGlyphParams, RenderImage, RenderImageParams, RenderSvgParams, Replay, ResizeEdge,
+    SMOOTH_SVG_SCALE_FACTOR, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, Shadow,
+    SharedString, Size, StrikethroughStyle, Style, SubpixelSprite, Subscription, SystemWindowTab,
     SystemWindowTabController, TabStopMap, Task, TextInputConfiguration, TextInputStateChange,
     TextRenderingMode, TextStyle, TextStyleRefinement, ThermalState, TransformationMatrix,
     Underline, UnderlineStyle, WindowAppearance, WindowBackgroundAppearance, WindowBounds,
@@ -73,7 +73,7 @@ mod prompts;
 
 pub use a11y::A11ySubtreeBuilder;
 pub(crate) use frame_record::RecordedInteractivity;
-pub use frame_record::{InteractionFlags, RecordedElement, RecordedText};
+pub use frame_record::{InteractionFlags, RecordedElement, RecordedRun, RecordedText};
 
 use self::a11y::A11y;
 #[cfg(not(target_family = "wasm"))]
@@ -4407,11 +4407,33 @@ impl Window {
         }
     }
 
-    pub(crate) fn record_text(&mut self, bounds: Bounds<Pixels>, text: &SharedString) {
+    pub(crate) fn record_text(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        text: &SharedString,
+        layout: &LineLayout,
+        line_height: Pixels,
+        decoration_runs: &[DecorationRun],
+    ) {
         if !self.frame_recording {
             return;
         }
         let visible_bounds = frame_record::visible(bounds, self.content_mask());
+        let runs = layout
+            .runs
+            .iter()
+            .filter_map(|run| {
+                Some(RecordedRun {
+                    start: run.glyphs.iter().map(|glyph| glyph.index).min()?,
+                    font_id: run.font_id,
+                    font_size: run.font_size,
+                })
+            })
+            .collect();
+        let colors = decoration_runs
+            .iter()
+            .map(|run| (run.len, run.color))
+            .collect();
         if let Some(element) = self
             .record_paint_stack
             .last()
@@ -4421,6 +4443,10 @@ impl Window {
                 bounds,
                 visible_bounds,
                 text: text.clone(),
+                font_size: layout.font_size,
+                line_height,
+                runs,
+                colors,
             });
         }
     }

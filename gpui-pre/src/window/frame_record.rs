@@ -8,7 +8,8 @@
 //! id path, the view, the hitbox, and the resolved style.
 
 use crate::{
-    Bounds, ContentMask, EntityId, FocusId, GlobalElementId, HitboxId, Pixels, SharedString, Style,
+    Bounds, ContentMask, EntityId, FocusId, FontId, GlobalElementId, HitboxId, Hsla, Pixels,
+    SharedString, Style,
 };
 use std::{panic::Location, rc::Rc};
 
@@ -94,6 +95,25 @@ pub struct RecordedText {
     pub visible_bounds: Bounds<Pixels>,
     /// The painted string.
     pub text: SharedString,
+    /// The line's font size. A run can set its own.
+    pub font_size: Pixels,
+    /// The height of each line.
+    pub line_height: Pixels,
+    /// Each shaped run, in paint order.
+    pub runs: Vec<RecordedRun>,
+    /// Each decoration run's length in UTF-8 bytes and its color.
+    pub colors: Vec<(u32, Hsla)>,
+}
+
+/// One shaped run of a recorded line: a stretch of glyphs in one font.
+#[derive(Clone, Copy, Debug)]
+pub struct RecordedRun {
+    /// The byte index of the run's first character.
+    pub start: usize,
+    /// The font the run's glyphs came from, after fallback.
+    pub font_id: FontId,
+    /// The run's own font size, if it set one.
+    pub font_size: Option<Pixels>,
 }
 
 /// What an `Interactivity` reports for the element being prepainted.
