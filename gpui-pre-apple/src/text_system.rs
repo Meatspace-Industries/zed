@@ -75,7 +75,7 @@ struct AppleTextSystemState {
     system_source: SystemSource,
     fonts: Vec<FontKitFont>,
     font_selections: HashMap<Font, FontId>,
-    font_ids_by_postscript_name: HashMap<String, FontId>,
+    font_ids_by_instance: HashMap<InstanceKey, FontId>,
     font_ids_by_font_key: HashMap<FontKey, SmallVec<[FontId; 4]>>,
     postscript_names_by_font_id: HashMap<FontId, String>,
 }
@@ -88,7 +88,7 @@ impl AppleTextSystem {
             system_source: SystemSource::new(),
             fonts: Vec::new(),
             font_selections: HashMap::default(),
-            font_ids_by_postscript_name: HashMap::default(),
+            font_ids_by_instance: HashMap::default(),
             font_ids_by_font_key: HashMap::default(),
             postscript_names_by_font_id: HashMap::default(),
         }))
@@ -181,17 +181,14 @@ impl PlatformTextSystem for AppleTextSystem {
                 },
             )?;
 
-            // A face of the requested weight draws as it is, as AppKit draws the system UI font's
-            // named instances (its Medium face is wght 510). Another face of a variable font is
-            // instanced at the requested weight.
+            // A face of a variable font draws at the requested weight, as Chromium sets the
+            // system UI font's `wght` axis to the CSS weight. The font's named faces are not
+            // exact (its Medium face is wght 510 and its Semibold face 590), so they set text
+            // about 0.3% wider or narrower than Electron.
             let font_id = candidates[ix];
-            let exact = (candidate_properties[ix].weight.0 - font.weight.0).abs() < 0.5;
-            let font_id = if exact {
-                font_id
-            } else {
-                lock.weight_instance(font_id, font.weight)
-                    .unwrap_or(font_id)
-            };
+            let font_id = lock
+                .weight_instance(font_id, font.weight)
+                .unwrap_or(font_id);
             lock.font_selections.insert(font.clone(), font_id);
             Ok(font_id)
         }
@@ -395,7 +392,7 @@ impl AppleTextSystemState {
             // Dedup is scoped to this single `load_family` call (issue #55472).
             // The same family can be reloaded later under a different `FontKey`
             // (different features/fallbacks); a global check against
-            // `font_ids_by_postscript_name` would skip every already-registered
+            // `font_ids_by_instance` would skip every already-registered
             // font and leave the second call's `font_ids` empty.
             if !postscript_names_seen.insert(postscript_name.clone()) {
                 log::warn!(
@@ -409,8 +406,8 @@ impl AppleTextSystemState {
             }
             let font_id = FontId(self.fonts.len());
             font_ids.push(font_id);
-            self.font_ids_by_postscript_name
-                .insert(postscript_name.clone(), font_id);
+            self.font_ids_by_instance
+                .insert(instance_key(&font.native_font()), font_id);
             self.postscript_names_by_font_id
                 .insert(font_id, postscript_name);
             self.fonts.push(font);
@@ -431,16 +428,14 @@ impl AppleTextSystemState {
     /// The instance of a variable font at `weight`, when the font has a `wght` axis and its
     /// current instance has another weight. font-kit matches a weight against the faces of a
     /// family, and a variable font is one face, so without this every weight draws the font's
-    /// default instance. CoreText names each instance, such as `Roboto-Medium`, so the shaped
-    /// runs map back to the instance through `id_for_native_font`.
+    /// default instance. The shaped runs map back to the instance through `id_for_native_font`
+    /// by its PostScript name and weight ([`instance_key`]).
     fn weight_instance(&mut self, font_id: FontId, weight: FontWeight) -> Option<FontId> {
-        const WGHT: i64 = 0x7767_6874;
         unsafe extern "C" {
             static kCTFontVariationAxisIdentifierKey: CFStringRef;
             static kCTFontVariationAxisMinimumValueKey: CFStringRef;
             static kCTFontVariationAxisMaximumValueKey: CFStringRef;
             static kCTFontVariationAxisDefaultValueKey: CFStringRef;
-            fn CTFontCopyVariation(font: CTFontRef) -> CFDictionaryRef;
             fn CTFontCreateCopyWithAttributes(
                 font: CTFontRef,
                 size: CGFloat,
@@ -464,19 +459,7 @@ impl AppleTextSystemState {
                 ))
             })?
         })?;
-        let current = unsafe {
-            let variation = CTFontCopyVariation(native.as_concrete_TypeRef());
-            if variation.is_null() {
-                None
-            } else {
-                let variation: CFDictionary<CFNumber, CFNumber> =
-                    TCFType::wrap_under_create_rule(variation);
-                variation
-                    .find(CFNumber::from(WGHT))
-                    .and_then(|value| value.to_f64())
-            }
-        }
-        .unwrap_or(default);
+        let current = wght_value(&native).unwrap_or(default);
         let target = f64::from(weight.0).clamp(minimum, maximum);
         if (target - current).abs() < 0.5 {
             return None;
@@ -498,30 +481,28 @@ impl AppleTextSystemState {
                 descriptor.as_concrete_TypeRef(),
             ))
         };
-        let postscript_name = instance.postscript_name();
-        if let Some(font_id) = self.font_ids_by_postscript_name.get(&postscript_name) {
-            return Some(*font_id);
-        }
+        // Each load of the family (one for each set of features and fallbacks) has its own
+        // faces, so it gets its own instance too: an instance of another load would shape
+        // without this load's features, such as tabular figures. `font_id` caches the result.
+        let key = instance_key(&instance);
         let font_id = FontId(self.fonts.len());
-        self.font_ids_by_postscript_name
-            .insert(postscript_name.clone(), font_id);
         self.postscript_names_by_font_id
-            .insert(font_id, postscript_name);
+            .insert(font_id, key.0.clone());
+        self.font_ids_by_instance.insert(key, font_id);
         self.fonts
             .push(unsafe { FontKitFont::from_native_font(&instance) });
         Some(font_id)
     }
 
     fn id_for_native_font(&mut self, requested_font: CTFont) -> FontId {
-        let postscript_name = requested_font.postscript_name();
-        if let Some(font_id) = self.font_ids_by_postscript_name.get(&postscript_name) {
+        let key = instance_key(&requested_font);
+        if let Some(font_id) = self.font_ids_by_instance.get(&key) {
             *font_id
         } else {
             let font_id = FontId(self.fonts.len());
-            self.font_ids_by_postscript_name
-                .insert(postscript_name.clone(), font_id);
             self.postscript_names_by_font_id
-                .insert(font_id, postscript_name);
+            .insert(font_id, key.0.clone());
+            self.font_ids_by_instance.insert(key, font_id);
             self.fonts
                 .push(font_kit::font::Font::from_core_graphics_font(
                     requested_font.copy_to_CGFont(),
@@ -891,6 +872,39 @@ fn bounds_from_rect_i(rect: RectI) -> Bounds<DevicePixels> {
 
 fn size_from_vector2f(vec: Vector2F) -> Size<f32> {
     size(vec.x(), vec.y())
+}
+
+const WGHT: i64 = 0x7767_6874;
+
+/// A loaded font's PostScript name and its `wght` axis value in hundredths, if it has one.
+/// CoreText gives an instance of a variable font the PostScript name of the face that it was
+/// made from, so the system UI font's Medium face (wght 510) and its instance at wght 500 differ
+/// only in the axis value.
+type InstanceKey = (String, Option<i64>);
+
+fn instance_key(font: &CTFont) -> InstanceKey {
+    (
+        font.postscript_name(),
+        wght_value(font).map(|value| (value * 100.).round() as i64),
+    )
+}
+
+/// The font's current `wght` axis value, if it has the axis.
+fn wght_value(font: &CTFont) -> Option<f64> {
+    unsafe extern "C" {
+        fn CTFontCopyVariation(font: CTFontRef) -> CFDictionaryRef;
+    }
+    unsafe {
+        let variation = CTFontCopyVariation(font.as_concrete_TypeRef());
+        if variation.is_null() {
+            return None;
+        }
+        let variation: CFDictionary<CFNumber, CFNumber> =
+            TCFType::wrap_under_create_rule(variation);
+        variation
+            .find(CFNumber::from(WGHT))
+            .and_then(|value| value.to_f64())
+    }
 }
 
 /// A face's CSS weight from its CoreText weight trait, through the `NSFontWeight` constants
