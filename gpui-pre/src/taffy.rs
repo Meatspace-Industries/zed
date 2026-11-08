@@ -2,7 +2,7 @@ use crate::{
     AbsoluteLength, App, Bounds, DefiniteLength, Edges, GridTemplate, Length, Pixels, Point, Size,
     Style, Window, size,
     util::{
-        ceil_to_device_pixel, css_border_width, round_half_toward_zero,
+        css_border_width, round_half_toward_zero,
         round_stroke_to_device_pixel, round_to_device_pixel,
     },
 };
@@ -270,7 +270,7 @@ impl TaffyLayoutEngine {
                                 window,
                                 cx,
                             );
-                            snap_measured_size_to_device_pixels(measured_size, scale_factor).into()
+                            measured_size_in_layout_units(measured_size, scale_factor).into()
                         },
                     )
                 },
@@ -304,8 +304,11 @@ impl TaffyLayoutEngine {
     //  1. Pre-layout metric snapping. Before Taffy computes layout, all
     //     authored absolute lengths are rounded in `to_taffy`. This
     //     includes borders, padding, gaps, and explicit sizes.
-    //     Custom-measured leaf nodes have their measured sizes rounded up
-    //     to integer device-pixel lengths.
+    //     Custom-measured leaf nodes (text, lists) have their measured sizes
+    //     rounded up to Chromium's layout unit, 1/64 of a logical pixel, not
+    //     to whole device pixels: a row of texts then lays out as a browser's
+    //     does instead of drifting by up to a device pixel for each text.
+    //     Their outer edges still snap in phase 2.
     //
     //  2. Post-layout edge snapping. After Taffy resolves the tree, layout
     //     relationships such as flex shares, grid tracks, percentages, and
@@ -420,8 +423,12 @@ impl From<LayoutId> for NodeId {
     }
 }
 
-fn snap_measured_size_to_device_pixels(size: Size<Pixels>, scale_factor: f32) -> Size<f32> {
-    size.map(|d| ceil_to_device_pixel(d.0.max(0.0), scale_factor))
+/// A measured size in device pixels, rounded up to Chromium's LayoutUnit (1/64 logical px). The
+/// rounded value is a multiple of 1/64, so the scale factors that displays use (multiples of
+/// 0.25) carry it to device pixels and back exactly: a text measured at its own width is handed
+/// that width back and never wraps.
+fn measured_size_in_layout_units(size: Size<Pixels>, scale_factor: f32) -> Size<f32> {
+    size.map(|d| (d.0.max(0.0) * 64.).ceil() / 64. * scale_factor)
 }
 
 fn border_widths_to_taffy(
