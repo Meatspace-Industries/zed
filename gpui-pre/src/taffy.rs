@@ -2,8 +2,8 @@ use crate::{
     AbsoluteLength, App, Bounds, DefiniteLength, Edges, GridTemplate, Length, Pixels, Point, Size,
     Style, Window, size,
     util::{
-        ceil_to_device_pixel, round_half_toward_zero, round_stroke_to_device_pixel,
-        round_to_device_pixel,
+        ceil_to_device_pixel, css_border_width, round_half_toward_zero,
+        round_stroke_to_device_pixel, round_to_device_pixel,
     },
 };
 use collections::{FxHashMap, FxHashSet};
@@ -431,7 +431,7 @@ fn border_widths_to_taffy(
 ) -> TaffyRect<taffy::style::LengthPercentage> {
     let snap = |w: &AbsoluteLength| {
         taffy::style::LengthPercentage::length(round_stroke_to_device_pixel(
-            w.to_pixels(rem_size).0,
+            css_border_width(w.to_pixels(rem_size).0),
             scale_factor,
         ))
     };
@@ -758,7 +758,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn border_widths_to_taffy_use_stroke_snapping() {
+    fn border_widths_to_taffy_follow_chromium() {
         let border_widths = Edges {
             top: Pixels(0.0).into(),
             right: Pixels(0.4).into(),
@@ -781,7 +781,7 @@ mod tests {
         );
         assert_eq!(
             taffy_border.left,
-            taffy::style::LengthPercentage::length(2.0)
+            taffy::style::LengthPercentage::length(1.0)
         );
     }
 }

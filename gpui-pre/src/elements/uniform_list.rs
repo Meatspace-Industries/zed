@@ -340,7 +340,7 @@ impl Element for UniformList {
         let style = self
             .interactivity
             .compute_style(global_id, None, window, cx);
-        let border = style.border_widths.to_pixels(window.rem_size());
+        let border = style.border_widths_in_pixels(window.rem_size());
         let padding = style
             .padding
             .to_pixels(bounds.size.into(), window.rem_size());

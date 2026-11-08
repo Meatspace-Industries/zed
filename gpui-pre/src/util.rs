@@ -141,6 +141,19 @@ pub(crate) fn round_to_device_pixel(logical: f32, scale_factor: f32) -> f32 {
     round_half_toward_zero(logical * scale_factor)
 }
 
+/// A border width as Chromium lays it out and paints it (`StyleBuilderConverter::
+/// ClampLineWidth`): a width under one logical pixel is one pixel, and a wider one rounds down
+/// to whole logical pixels. The device scale takes no part, so a 0.5 px hairline is 1 px wide
+/// at 2x too.
+#[inline]
+pub(crate) fn css_border_width(logical: f32) -> f32 {
+    if logical > 0.0 && logical < 1.0 {
+        1.0
+    } else {
+        logical.max(0.0).floor()
+    }
+}
+
 #[inline]
 pub(crate) fn round_stroke_to_device_pixel(logical: f32, scale_factor: f32) -> f32 {
     if logical == 0.0 {

@@ -667,10 +667,11 @@ impl Style {
                     .border_color
                     .is_some_and(|color| !color.is_transparent())
                 {
-                    min.x += self.border_widths.left.to_pixels(rem_size);
-                    max.x -= self.border_widths.right.to_pixels(rem_size);
-                    min.y += self.border_widths.top.to_pixels(rem_size);
-                    max.y -= self.border_widths.bottom.to_pixels(rem_size);
+                    let border_widths = self.border_widths_in_pixels(rem_size);
+                    min.x += border_widths.left;
+                    max.x -= border_widths.right;
+                    min.y += border_widths.top;
+                    max.y -= border_widths.bottom;
                 }
 
                 let bounds = match (
@@ -756,7 +757,7 @@ impl Style {
         continuation(window, cx);
 
         if self.is_border_visible() {
-            let border_widths = self.border_widths.to_pixels(rem_size);
+            let border_widths = self.border_widths_in_pixels(rem_size);
             let mut background = self.border_color.unwrap_or_default();
             background.a = 0.;
             window.paint_quad(quad(
@@ -773,6 +774,13 @@ impl Style {
         if self.debug_below {
             cx.remove_global::<DebugBelow>();
         }
+    }
+
+    /// The border widths in pixels, as Chromium lays them out and paints them
+    /// ([`crate::util::css_border_width`]).
+    pub fn border_widths_in_pixels(&self, rem_size: Pixels) -> Edges<Pixels> {
+        self.border_widths
+            .map(|width| px(crate::util::css_border_width(width.to_pixels(rem_size).0)))
     }
 
     fn is_border_visible(&self) -> bool {
