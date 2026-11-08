@@ -776,8 +776,12 @@ impl TextLayout {
                 for line in &lines {
                     let line_size = line.size(line_height);
                     size.height += line_size.height;
-                    size.width = size.width.max(line_size.width).ceil();
+                    size.width = size.width.max(line_size.width);
                 }
+                // Round up to Chromium's layout unit (1/64 px), not a whole pixel: a line laid
+                // out at its own width still never wraps, and a row of texts does not drift
+                // from a browser's by up to a pixel for each text.
+                size.width = Pixels((f32::from(size.width) * 64.).ceil() / 64.);
 
                 element_state.0.borrow_mut().replace(TextLayoutInner {
                     lines,
