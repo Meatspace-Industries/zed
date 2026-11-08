@@ -4435,20 +4435,56 @@ impl Window {
             .iter()
             .map(|run| (run.len, run.color))
             .collect();
+        self.push_recorded_text(RecordedText {
+            bounds,
+            visible_bounds,
+            text: text.clone(),
+            font_size: layout.font_size,
+            line_height,
+            runs,
+            colors,
+        });
+    }
+
+    /// Records one line of text that the caller paints from its own glyphs, such as figures from
+    /// a glyph cache, so the devtools frame record lists it as it lists a shaped line. `bounds`
+    /// is the line's box, and `font_id` the font that the text asked for. It does nothing when
+    /// the frame is not recorded.
+    pub fn record_painted_text(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        text: &str,
+        font_id: FontId,
+        font_size: Pixels,
+        color: Hsla,
+    ) {
+        if !self.frame_recording {
+            return;
+        }
+        let visible_bounds = frame_record::visible(bounds, self.content_mask());
+        self.push_recorded_text(RecordedText {
+            bounds,
+            visible_bounds,
+            text: SharedString::from(text.to_owned()),
+            font_size,
+            line_height: bounds.size.height,
+            runs: vec![RecordedRun {
+                start: 0,
+                font_id,
+                requested_font_id: Some(font_id),
+                font_size: None,
+            }],
+            colors: vec![(text.len() as u32, color)],
+        });
+    }
+
+    fn push_recorded_text(&mut self, text: RecordedText) {
         if let Some(element) = self
             .record_paint_stack
             .last()
             .and_then(|&index| self.next_frame.recorded_elements.get_mut(index))
         {
-            element.texts.push(RecordedText {
-                bounds,
-                visible_bounds,
-                text: text.clone(),
-                font_size: layout.font_size,
-                line_height,
-                runs,
-                colors,
-            });
+            element.texts.push(text);
         }
     }
 
