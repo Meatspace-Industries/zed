@@ -58,6 +58,7 @@ pub(crate) fn mark_run_directions(layout: &mut LineLayout, text: &str, rtl: bool
                         glyphs: vec![glyph],
                         is_rtl: glyph_rtl,
                         font_size: run.font_size,
+                        requested_font_id: run.requested_font_id,
                     });
                 }
             }

@@ -723,6 +723,7 @@ impl AppleTextSystemState {
                         glyphs: Vec::with_capacity(run.glyph_count().try_into().unwrap_or(0)),
                         is_rtl: false,
                         font_size: None,
+                        requested_font_id: None,
                     });
                     &mut runs.last_mut().unwrap().glyphs
                 }

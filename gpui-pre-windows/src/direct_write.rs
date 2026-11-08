@@ -1702,6 +1702,7 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
             glyphs,
             is_rtl: false,
             font_size: None,
+            requested_font_id: None,
         });
         Ok(())
     }

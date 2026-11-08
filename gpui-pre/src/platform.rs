@@ -1700,6 +1700,7 @@ impl PlatformTextSystem for NoopTextSystem {
                 glyphs,
                 is_rtl: false,
                 font_size: None,
+                requested_font_id: None,
             });
         } else {
             position = px(0.);

@@ -4426,6 +4426,7 @@ impl Window {
                 Some(RecordedRun {
                     start: run.glyphs.iter().map(|glyph| glyph.index).min()?,
                     font_id: run.font_id,
+                    requested_font_id: run.requested_font_id,
                     font_size: run.font_size,
                 })
             })

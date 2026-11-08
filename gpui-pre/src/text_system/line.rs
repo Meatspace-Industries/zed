@@ -337,6 +337,7 @@ impl<'a> ShapedLineCursor<'a> {
                 runs.push(crate::ShapedRun {
                     is_rtl: run.is_rtl,
                     font_size: run.font_size,
+                    requested_font_id: run.requested_font_id,
                     font_id: run.font_id,
                     glyphs: run.glyphs[start..end]
                         .iter()
@@ -1338,6 +1339,7 @@ mod tests {
                     font_id: FontId(0),
                     is_rtl: false,
                     font_size: None,
+                    requested_font_id: None,
                     glyphs: shaped_glyphs,
                 }],
                 len: text.len(),
@@ -1789,6 +1791,7 @@ mod tests {
                         font_id: FontId(0),
                         is_rtl: false,
                         font_size: None,
+                        requested_font_id: None,
                         glyphs: vec![
                             ShapedGlyph {
                                 id: GlyphId(0),
@@ -1814,6 +1817,7 @@ mod tests {
                         font_id: FontId(1),
                         is_rtl: false,
                         font_size: None,
+                        requested_font_id: None,
                         glyphs: vec![
                             ShapedGlyph {
                                 id: GlyphId(0),
@@ -2039,6 +2043,7 @@ mod tests {
                         font_id: FontId(3),
                         is_rtl: false,
                         font_size: None,
+                        requested_font_id: None,
                         glyphs: vec![
                             ShapedGlyph {
                                 id: GlyphId(11),
@@ -2064,6 +2069,7 @@ mod tests {
                         font_id: FontId(8),
                         is_rtl: false,
                         font_size: None,
+                        requested_font_id: None,
                         glyphs: vec![
                             ShapedGlyph {
                                 id: GlyphId(21),

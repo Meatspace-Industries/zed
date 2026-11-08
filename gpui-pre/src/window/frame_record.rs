@@ -112,6 +112,9 @@ pub struct RecordedRun {
     pub start: usize,
     /// The font the run's glyphs came from, after fallback.
     pub font_id: FontId,
+    /// The font that the run's text asked for, before fallback. `None` for a line that GPUI
+    /// did not shape.
+    pub requested_font_id: Option<FontId>,
     /// The run's own font size, if it set one.
     pub font_size: Option<Pixels>,
 }
