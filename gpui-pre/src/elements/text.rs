@@ -640,11 +640,13 @@ impl TextLayout {
     ) -> LayoutId {
         let text_style = window.text_style();
         let font_size = text_style.font_size.to_pixels(window.rem_size());
-        let line_height = window.pixel_snap(
-            text_style
-                .line_height
-                .to_pixels(font_size.into(), window.rem_size()),
-        );
+        // Chromium's line box height: the computed line height in its layout unit (1/64 px), not
+        // snapped to a device pixel, so 14 px text at 1.375 stacks its lines 19.25 px apart. Glyph
+        // baselines still land on device pixels when they paint.
+        let line_height = text_style
+            .line_height
+            .to_pixels(font_size.into(), window.rem_size())
+            .round_to_layout_unit();
 
         let mut runs = if let Some(runs) = runs {
             runs

@@ -2836,6 +2836,11 @@ impl Pixels {
         Self(self.0.ceil())
     }
 
+    /// Rounds to Chromium's layout unit (`LayoutUnit`), 1/64 of a pixel.
+    pub fn round_to_layout_unit(&self) -> Self {
+        Self((self.0 * 64.).round() / 64.)
+    }
+
     /// Scales the `Pixels` value by a given factor, producing `ScaledPixels`.
     ///
     /// This method is used when adjusting pixel values for display scaling factors,

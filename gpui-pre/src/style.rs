@@ -561,9 +561,11 @@ impl TextStyle {
         }
     }
 
-    /// Returns the rounded line height in pixels.
+    /// Returns the line height in pixels, rounded to Chromium's layout unit (1/64 px).
     pub fn line_height_in_pixels(&self, rem_size: Pixels) -> Pixels {
-        self.line_height.to_pixels(self.font_size, rem_size).round()
+        self.line_height
+            .to_pixels(self.font_size, rem_size)
+            .round_to_layout_unit()
     }
 
     /// Convert this text style into a [`TextRun`], for the given length of the text.
