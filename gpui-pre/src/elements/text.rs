@@ -1,8 +1,8 @@
 use crate::{
     ActiveTooltip, AnyView, App, Bounds, DispatchPhase, Element, ElementId, GlobalElementId,
     HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId, IntoElement, IsZero, LayoutId,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Size, TextOverflow,
-    TextRun, TextStyle, TooltipId, TruncateFrom, WhiteSpace, Window, WrappedLine,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Size,
+    TextOverflow, TextRun, TextStyle, TooltipId, TruncateFrom, WhiteSpace, Window, WrappedLine,
     WrappedLineLayout, register_tooltip_mouse_handlers, set_tooltip_on_window,
 };
 use anyhow::Context as _;
@@ -1072,8 +1072,8 @@ impl InteractiveText {
         }
     }
 
-    /// on_click is called when the user clicks on one of the given ranges, passing the index of
-    /// the clicked range.
+    /// on_click is called on a primary click within one of the given ranges, passing its index.
+    /// Selecting text by releasing at another character does not activate the range.
     pub fn on_click(
         mut self,
         ranges: Vec<Range<usize>>,
@@ -1081,7 +1081,8 @@ impl InteractiveText {
     ) -> Self {
         self.click_listener = Some(Box::new(move |ranges, event, window, cx| {
             for (range_ix, range) in ranges.iter().enumerate() {
-                if range.contains(&event.mouse_down_index) && range.contains(&event.mouse_up_index)
+                if event.mouse_down_index == event.mouse_up_index
+                    && range.contains(&event.mouse_down_index)
                 {
                     listener(range_ix, window, cx);
                 }
@@ -1209,7 +1210,15 @@ impl Element for InteractiveText {
                         let clickable_ranges = mem::take(&mut self.clickable_ranges);
                         window.on_mouse_event(
                             move |event: &MouseUpEvent, phase, window: &mut Window, cx| {
-                                if phase == DispatchPhase::Bubble && hitbox.is_hovered(window) {
+                                if event.button != MouseButton::Left {
+                                    return;
+                                }
+                                // A release outside the text, or consumed by another element,
+                                // must not leave this press armed for the next click.
+                                if phase == DispatchPhase::Capture {
+                                    mouse_down.take();
+                                    window.refresh();
+                                } else if hitbox.is_hovered(window) {
                                     if let Ok(mouse_up_index) =
                                         text_layout.index_for_position(event.position)
                                     {
@@ -1224,8 +1233,6 @@ impl Element for InteractiveText {
                                         )
                                     }
 
-                                    mouse_down.take();
-                                    window.refresh();
                                 }
                             },
                         );
@@ -1233,6 +1240,7 @@ impl Element for InteractiveText {
                         let hitbox = hitbox.clone();
                         window.on_mouse_event(move |event: &MouseDownEvent, phase, window, _| {
                             if phase == DispatchPhase::Bubble
+                                && event.button == MouseButton::Left
                                 && hitbox.is_hovered(window)
                                 && let Ok(mouse_down_index) =
                                     text_layout.index_for_position(event.position)
