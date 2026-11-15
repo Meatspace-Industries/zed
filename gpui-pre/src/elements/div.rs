@@ -2763,6 +2763,7 @@ impl Interactivity {
                         &[window.text_style().to_run(str_len)],
                         None,
                         None,
+                        crate::LineBreakStrategy::Greedy,
                     )
                     .ok()
                     .and_then(|mut text| text.pop())

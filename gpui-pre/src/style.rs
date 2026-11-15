@@ -402,6 +402,17 @@ pub enum WhiteSpace {
     Nowrap,
 }
 
+/// How to choose soft line breaks within a paragraph.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub enum LineBreakStrategy {
+    /// Fill each line with as much text as fits.
+    #[default]
+    Greedy,
+    /// Move the final legal break earlier when a one-word last line can share a line with
+    /// another word. Keeps the preceding line nonempty and never changes the text.
+    AvoidWidows,
+}
+
 /// How to truncate text that overflows the width of the element
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum TextOverflow {
@@ -477,6 +488,9 @@ pub struct TextStyle {
     /// How to handle whitespace in the text
     pub white_space: WhiteSpace,
 
+    /// How to choose soft line breaks when wrapping is enabled.
+    pub line_break_strategy: LineBreakStrategy,
+
     /// The text should be truncated if it overflows the width of the element
     pub text_overflow: Option<TextOverflow>,
 
@@ -508,6 +522,7 @@ impl Default for TextStyle {
             underline: None,
             strikethrough: None,
             white_space: WhiteSpace::Normal,
+            line_break_strategy: LineBreakStrategy::default(),
             text_overflow: None,
             text_align: TextAlign::default(),
             line_clamp: None,
