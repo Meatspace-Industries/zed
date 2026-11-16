@@ -2410,6 +2410,15 @@ impl Interactivity {
                 let style = self.compute_style_internal(None, element_state.as_mut(), window, cx);
 
                 if let Some(element_state) = element_state.as_mut() {
+                    if self
+                        .tracked_focus_handle
+                        .as_ref()
+                        .is_some_and(|handle| handle.tab_stop && handle.is_focused(window))
+                        && element_state.revealed_focus_generation != Some(window.focus_generation)
+                    {
+                        element_state.revealed_focus_generation = Some(window.focus_generation);
+                        window.request_autoscroll(bounds);
+                    }
                     if let Some(clicked_state) = element_state.clicked_state.as_ref() {
                         let clicked_state = clicked_state.borrow();
                         self.active = Some(clicked_state.element);
@@ -2489,9 +2498,46 @@ impl Interactivity {
 
                             let scroll_offset =
                                 self.clamp_scroll_position(bounds, &style, window, cx);
+                            // A request from an earlier sibling belongs to its ancestor, not
+                            // this scroller. Only consume requests made by our descendants.
+                            let incoming = self
+                                .scroll_offset
+                                .as_ref()
+                                .and_then(|_| window.take_autoscroll());
                             let result = window.with_element_opacity(style.opacity, |window| {
                                 f(&style, scroll_offset, hitbox, window, cx)
                             });
+                            if let Some(offset) = &self.scroll_offset {
+                                if let Some(mut target) = window.take_autoscroll() {
+                                    let mut desired = scroll_offset;
+                                    if style.overflow.x == Overflow::Scroll {
+                                        if target.left() < bounds.left() {
+                                            desired.x += bounds.left() - target.left();
+                                        } else if target.right() > bounds.right() {
+                                            desired.x += bounds.right() - target.right();
+                                        }
+                                    }
+                                    if style.overflow.y == Overflow::Scroll {
+                                        if target.top() < bounds.top() {
+                                            desired.y += bounds.top() - target.top();
+                                        } else if target.bottom() > bounds.bottom() {
+                                            desired.y += bounds.bottom() - target.bottom();
+                                        }
+                                    }
+                                    *offset.borrow_mut() = desired;
+                                    let adjusted =
+                                        self.clamp_scroll_position(bounds, &style, window, cx);
+                                    target.origin += adjusted - scroll_offset;
+                                    if adjusted != scroll_offset {
+                                        // Children keep this frame's prepaint geometry. Draw again
+                                        // outside prepaint so the corrected offset takes effect.
+                                        window.on_next_frame(|window, _| window.refresh());
+                                    }
+                                    window.request_autoscroll(target);
+                                } else if let Some(incoming) = incoming {
+                                    window.request_autoscroll(incoming);
+                                }
+                            }
                             (result, element_state)
                         },
                     )
@@ -3713,6 +3759,8 @@ impl Interactivity {
 #[derive(Default)]
 pub struct InteractiveElementState {
     pub(crate) focus_handle: Option<FocusHandle>,
+    // Reveal once on focus entry, without fighting subsequent manual scrolling.
+    revealed_focus_generation: Option<u64>,
     pub(crate) clicked_state: Option<Rc<RefCell<ElementClickedState>>>,
     pub(crate) hover_state: Option<Rc<RefCell<ElementHoverState>>>,
     pub(crate) hover_listener_state: Option<Rc<RefCell<bool>>>,
