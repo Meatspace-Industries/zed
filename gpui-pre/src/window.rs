@@ -2691,6 +2691,46 @@ impl Window {
         }
     }
 
+    /// Move focus to the next tab stop inside `scope`, wrapping inside that subtree.
+    /// Candidates outside the scope never receive focus.
+    pub fn focus_next_in(&mut self, scope: &FocusHandle, cx: &mut App) {
+        self.focus_in(scope, false, cx);
+    }
+
+    /// Move focus to the previous tab stop inside `scope`, wrapping inside that subtree.
+    /// If the subtree has no tab stops, focus remains unchanged.
+    pub fn focus_prev_in(&mut self, scope: &FocusHandle, cx: &mut App) {
+        self.focus_in(scope, true, cx);
+    }
+
+    fn focus_in(&mut self, scope: &FocusHandle, reverse: bool, cx: &mut App) {
+        if !self.focus_enabled {
+            return;
+        }
+        let mut current = self.focus;
+        let mut first = None;
+        loop {
+            let stops = &self.rendered_frame.tab_stops;
+            let candidate = if reverse {
+                stops.prev(current.as_ref())
+            } else {
+                stops.next(current.as_ref())
+            };
+            let Some(candidate) = candidate else {
+                return;
+            };
+            if first == Some(candidate.id) {
+                return;
+            }
+            first.get_or_insert(candidate.id);
+            if scope.contains(&candidate, self) {
+                self.focus(&candidate, cx);
+                return;
+            }
+            current = Some(candidate.id);
+        }
+    }
+
     /// Accessor for the text system.
     pub fn text_system(&self) -> &Rc<WindowTextSystem> {
         &self.text_system
