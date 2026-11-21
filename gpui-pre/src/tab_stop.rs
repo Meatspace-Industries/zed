@@ -34,7 +34,10 @@ impl TabStopOperation {
 type TabIndex = isize;
 
 #[derive(Debug, Default, PartialEq, Eq, Clone, Ord, PartialOrd)]
-struct TabStopPath(smallvec::SmallVec<[TabIndex; 6]>);
+// Each segment orders peers by their explicit index, then by insertion order.
+// A group needs its own insertion order so equal-index sibling groups stay
+// contiguous instead of interleaving their children.
+struct TabStopPath(smallvec::SmallVec<[(TabIndex, usize); 6]>);
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct TabStopNode {
@@ -79,7 +82,8 @@ impl TabStopMap {
         self.insertion_history
             .push(TabStopOperation::Insert(focus_handle.clone()));
         let mut path = self.current_path.clone();
-        path.0.push(focus_handle.tab_index);
+        path.0
+            .push((focus_handle.tab_index, self.insertion_history.len() - 1));
         let order = TabStopNode {
             node_insertion_index: self.insertion_history.len() - 1,
             tab_stop: focus_handle.tab_stop,
@@ -92,7 +96,9 @@ impl TabStopMap {
     pub fn begin_group(&mut self, tab_index: isize) {
         self.insertion_history
             .push(TabStopOperation::Group(tab_index));
-        self.current_path.0.push(tab_index);
+        self.current_path
+            .0
+            .push((tab_index, self.insertion_history.len() - 1));
     }
 
     pub fn end_group(&mut self) {
@@ -550,6 +556,54 @@ mod tests {
             .tab_stop(3, 4)
             .tab_stop(4, 5)
             .assert()
+    }
+
+    #[test]
+    fn same_index_groups_keep_their_own_non_stop_boundaries() {
+        let focus_map = Arc::new(RwLock::new(FocusMap::default()));
+        let mut map = TabStopMap::default();
+        let mut groups = Vec::new();
+        for _ in 0..2 {
+            let start = FocusHandle::new(&focus_map).tab_index(-1).tab_stop(false);
+            let first = FocusHandle::new(&focus_map).tab_index(0).tab_stop(true);
+            let last = FocusHandle::new(&focus_map).tab_index(1).tab_stop(true);
+            let end = FocusHandle::new(&focus_map)
+                .tab_index(isize::MAX)
+                .tab_stop(false);
+            map.begin_group(0);
+            for handle in [&start, &first, &last, &end] {
+                map.insert(handle);
+            }
+            map.end_group();
+            groups.push((start, first, last, end));
+        }
+        for (start, first, last, end) in &groups {
+            assert_eq!(map.next(Some(&start.id)), Some(first.clone()));
+            assert_eq!(map.prev(Some(&end.id)), Some(last.clone()));
+        }
+        let operations = map.insertion_history.clone();
+        map.clear();
+        map.replay(&operations);
+        for (start, first, last, end) in &groups {
+            assert_eq!(map.next(Some(&start.id)), Some(first.clone()));
+            assert_eq!(map.prev(Some(&end.id)), Some(last.clone()));
+        }
+    }
+
+    #[test]
+    fn same_index_nested_groups_remain_contiguous() {
+        TabStopMapTest::new()
+            .tab_group(0, |t| {
+                t.tab_stop(0, 0)
+                    .tab_group(1, |t| t.tab_stop(0, 1).tab_stop(1, 2))
+                    .tab_stop(2, 3)
+            })
+            .tab_group(0, |t| {
+                t.tab_stop(0, 4)
+                    .tab_group(1, |t| t.tab_stop(0, 5).tab_stop(1, 6))
+                    .tab_stop(2, 7)
+            })
+            .assert();
     }
 
     #[test]

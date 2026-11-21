@@ -625,6 +625,8 @@ struct TextLayoutInner {
     lines: SmallVec<[WrappedLine; 1]>,
     line_height: Pixels,
     wrap_width: Option<Pixels>,
+    line_break_strategy: crate::LineBreakStrategy,
+    line_clamp: Option<usize>,
     truncate_width: Option<Pixels>,
     size: Option<Size<Pixels>>,
     bounds: Option<Bounds<Pixels>>,
@@ -705,6 +707,8 @@ impl TextLayout {
                     && (wrap_width.is_none() || wrap_width == text_layout.wrap_width)
                     && truncate_width.is_none()
                     && text_layout.truncate_width.is_none()
+                    && text_layout.line_break_strategy == text_style.line_break_strategy
+                    && text_layout.line_clamp == text_style.line_clamp
                 {
                     return size;
                 }
@@ -724,7 +728,14 @@ impl TextLayout {
                         )
                     } else if let Some(unclipped) = window
                         .text_system()
-                        .shape_text(text.clone(), font_size, &runs, None, None)
+                        .shape_text(
+                            text.clone(),
+                            font_size,
+                            &runs,
+                            None,
+                            None,
+                            text_style.line_break_strategy,
+                        )
                         .log_err()
                         && unclipped
                             .iter()
@@ -759,6 +770,7 @@ impl TextLayout {
                         &runs,
                         wrap_width,            // Wrap if we know the width.
                         text_style.line_clamp, // Limit the number of lines if line_clamp is set.
+                        text_style.line_break_strategy,
                     )
                     .log_err()
                 else {
@@ -767,6 +779,8 @@ impl TextLayout {
                         len: 0,
                         line_height,
                         wrap_width,
+                        line_break_strategy: text_style.line_break_strategy,
+                        line_clamp: text_style.line_clamp,
                         truncate_width,
                         size: Some(Size::default()),
                         bounds: None,
@@ -790,6 +804,8 @@ impl TextLayout {
                     len,
                     line_height,
                     wrap_width,
+                    line_break_strategy: text_style.line_break_strategy,
+                    line_clamp: text_style.line_clamp,
                     truncate_width,
                     size: Some(size),
                     bounds: None,
