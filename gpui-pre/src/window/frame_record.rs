@@ -8,7 +8,7 @@
 //! id path, the view, the hitbox, and the resolved style.
 
 use crate::{
-    Bounds, ContentMask, EntityId, FocusId, FontId, GlobalElementId, HitboxId, Hsla, Pixels,
+    Bounds, ContentMask, EntityId, FocusId, FontId, GlobalElementId, HitboxId, Hsla, Pixels, Point,
     SharedString, Style,
 };
 use std::{panic::Location, rc::Rc};
@@ -133,12 +133,14 @@ pub(crate) fn visible(bounds: Bounds<Pixels>, mask: ContentMask<Pixels>) -> Boun
 }
 
 /// Copies a cached view's elements from the last frame, with their parent indices moved to
-/// where the copies land.
+/// where the copies land, and their bounds and texts moved by `offset`, the view's move when it
+/// replays at a new origin.
 pub(crate) fn reparent(
     elements: &[RecordedElement],
     old_start: usize,
     new_start: usize,
     outer_parent: Option<usize>,
+    offset: Point<Pixels>,
 ) -> impl Iterator<Item = RecordedElement> + '_ {
     elements.iter().map(move |element| {
         let mut element = element.clone();
@@ -146,6 +148,12 @@ pub(crate) fn reparent(
             Some(parent) if parent >= old_start => Some(parent - old_start + new_start),
             _ => outer_parent,
         };
+        element.bounds.origin += offset;
+        element.visible_bounds.origin += offset;
+        for text in &mut element.texts {
+            text.bounds.origin += offset;
+            text.visible_bounds.origin += offset;
+        }
         element
     })
 }

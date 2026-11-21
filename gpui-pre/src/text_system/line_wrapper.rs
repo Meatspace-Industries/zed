@@ -1433,6 +1433,7 @@ mod tests {
                     ],
                     Some(px(72.)),
                     None,
+                    crate::LineBreakStrategy::Greedy,
                 )
                 .unwrap();
 

@@ -2,6 +2,7 @@ mod bidi;
 mod font_fallbacks;
 mod font_features;
 mod line;
+mod line_break;
 mod line_layout;
 mod line_wrapper;
 
@@ -14,8 +15,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Bounds, DevicePixels, Hsla, Pixels, PlatformTextSystem, Point, Result, SharedString, Size,
-    StrikethroughStyle, TextRenderingMode, UnderlineStyle, px,
+    Bounds, DevicePixels, Hsla, LineBreakStrategy, Pixels, PlatformTextSystem, Point, Result,
+    SharedString, Size, StrikethroughStyle, TextRenderingMode, UnderlineStyle, px,
 };
 use anyhow::Context as _;
 use collections::{FxHashMap, FxHashSet};
@@ -716,7 +717,7 @@ impl WindowTextSystem {
 
     /// Shape a multi line string of text, at the given font_size, for painting to the screen.
     /// Subsets of the text can be styled independently with the `runs` parameter.
-    /// If `wrap_width` is provided, the line breaks will be adjusted to fit within the given width.
+    /// If `wrap_width` is provided, the line breaks follow `line_break_strategy` within that width.
     pub fn shape_text(
         &self,
         text: SharedString,
@@ -724,6 +725,7 @@ impl WindowTextSystem {
         runs: &[TextRun],
         wrap_width: Option<Pixels>,
         line_clamp: Option<usize>,
+        line_break_strategy: LineBreakStrategy,
     ) -> Result<SmallVec<[WrappedLine; 1]>> {
         let mut runs = runs.iter().filter(|run| run.len > 0).cloned().peekable();
         let mut font_runs = self.font_runs_buffer.take();
@@ -797,6 +799,7 @@ impl WindowTextSystem {
                 &font_runs,
                 wrap_width,
                 max_wrap_lines.map(|max| max.saturating_sub(wrapped_lines)),
+                line_break_strategy,
             );
             wrapped_lines += layout.wrap_boundaries.len();
 

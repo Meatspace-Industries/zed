@@ -2046,11 +2046,21 @@ impl From<TileId> for etagere::AllocId {
     }
 }
 
+/// `bounds` moved by `offset`.
+fn moved(mut bounds: Bounds<Pixels>, offset: Point<Pixels>) -> Bounds<Pixels> {
+    bounds.origin += offset;
+    bounds
+}
+
 #[expect(missing_docs)]
 pub struct PlatformInputHandler {
     cx: AsyncWindowContext,
     handler: Box<dyn InputHandler>,
     focus_id: Option<crate::FocusId>,
+    /// How far the view that registered the handler moved since it did (see
+    /// [`Window::set_replay_moved_views`](crate::Window::set_replay_moved_views)): the bounds
+    /// that the handler reports move by it, and a point that it gets moves back.
+    pub(crate) offset: Point<Pixels>,
 }
 
 #[expect(missing_docs)]
@@ -2067,6 +2077,7 @@ impl PlatformInputHandler {
             cx,
             handler,
             focus_id: None,
+            offset: Point::default(),
         }
     }
 
@@ -2190,19 +2201,25 @@ impl PlatformInputHandler {
     }
 
     pub fn bounds_for_range(&mut self, range_utf16: Range<usize>) -> Option<Bounds<Pixels>> {
+        let offset = self.offset;
         self.cx
             .update(|window, cx| self.handler.bounds_for_range(range_utf16, window, cx))
             .ok()
             .flatten()
+            .map(|bounds| moved(bounds, offset))
     }
 
     pub fn selection_bounds_for_range(&mut self, range_utf16: Range<usize>) -> Vec<Bounds<Pixels>> {
+        let offset = self.offset;
         self.cx
             .update(|window, cx| {
                 self.handler
                     .selection_bounds_for_range(range_utf16, window, cx)
             })
             .unwrap_or_default()
+            .into_iter()
+            .map(|bounds| moved(bounds, offset))
+            .collect()
     }
 
     #[allow(dead_code)]
@@ -2252,9 +2269,11 @@ impl PlatformInputHandler {
     pub fn selected_bounds(&mut self, window: &mut Window, cx: &mut App) -> Option<Bounds<Pixels>> {
         let marked_range = self.handler.marked_text_range(window, cx);
         let selection = self.handler.selected_text_range(true, window, cx)?;
+        let offset = self.offset;
         Self::compute_ime_candidate_bounds(marked_range, &selection, |range| {
             self.handler.bounds_for_range(range, window, cx)
         })
+        .map(|bounds| moved(bounds, offset))
     }
 
     pub fn ime_candidate_bounds(&mut self) -> Option<Bounds<Pixels>> {
@@ -2267,6 +2286,7 @@ impl PlatformInputHandler {
 
     #[allow(unused)]
     pub fn character_index_for_point(&mut self, point: Point<Pixels>) -> Option<usize> {
+        let point = point - self.offset;
         self.cx
             .update(|window, cx| self.handler.character_index_for_point(point, window, cx))
             .ok()
@@ -2285,10 +2305,12 @@ impl PlatformInputHandler {
 
     /// See [`InputHandler::element_bounds`].
     pub fn element_bounds(&mut self) -> Option<Bounds<Pixels>> {
+        let offset = self.offset;
         self.cx
             .update(|window, cx| self.handler.element_bounds(window, cx))
             .ok()
             .flatten()
+            .map(|bounds| moved(bounds, offset))
     }
 
     /// See [`InputHandler::text_length_utf16`].

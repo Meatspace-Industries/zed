@@ -1,6 +1,6 @@
 use crate::{
-    Bounds, FontId, GlyphId, Pixels, PlatformTextSystem, Point, SharedString, Size, TextAlign,
-    point, px, size,
+    Bounds, FontId, GlyphId, LineBreakStrategy, Pixels, PlatformTextSystem, Point, SharedString,
+    Size, TextAlign, point, px, size,
 };
 use collections::{FxHashMap, FxHashSet};
 use itertools::Itertools;
@@ -17,7 +17,7 @@ use std::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 
-use super::{LineWrapper, bidi};
+use super::{LineWrapper, bidi, line_break::avoid_widow};
 
 /// A laid out and styled line of text
 #[derive(Default, Debug)]
@@ -238,9 +238,10 @@ impl LineLayout {
         text: &str,
         wrap_width: Pixels,
         max_lines: Option<usize>,
+        line_break_strategy: LineBreakStrategy,
         scratch: &mut WrapScratch,
     ) -> SmallVec<[WrapBoundary; 1]> {
-        let mut boundaries = SmallVec::new();
+        let mut boundaries: SmallVec<[WrapBoundary; 1]> = SmallVec::new();
         let mut current_segment: Option<Range<usize>> = None;
         let mut last_candidate_ix = None;
         let mut last_candidate_x = px(0.);
@@ -327,6 +328,29 @@ impl LineLayout {
                     last_boundary_x = x;
                 }
                 boundaries.push(last_boundary);
+            }
+        }
+
+        if line_break_strategy == LineBreakStrategy::AvoidWidows
+            && let Some(last) = boundaries.last()
+        {
+            let last_start = self.runs[last.run_ix].glyphs[last.glyph_ix].index;
+            let previous_start = boundaries.iter().rev().nth(1).map_or(0, |boundary| {
+                self.runs[boundary.run_ix].glyphs[boundary.glyph_ix].index
+            });
+            if let Some(start) =
+                avoid_widow(text, previous_start, last_start, break_indices, |start| {
+                    self.width - self.x_for_index(start) <= wrap_width
+                })
+            {
+                // Only the boundary moves: glyphs, byte indices, and text remain unchanged.
+                for (run_ix, run) in self.runs.iter().enumerate() {
+                    if let Some(glyph_ix) = run.glyphs.iter().position(|glyph| glyph.index == start)
+                    {
+                        *boundaries.last_mut().unwrap() = WrapBoundary { run_ix, glyph_ix };
+                        break;
+                    }
+                }
             }
         }
 
@@ -803,6 +827,7 @@ impl LineLayoutCache {
         runs: &[FontRun],
         wrap_width: Option<Pixels>,
         max_lines: Option<usize>,
+        line_break_strategy: LineBreakStrategy,
     ) -> Arc<WrappedLineLayout>
     where
         Text: AsRef<str>,
@@ -814,6 +839,8 @@ impl LineLayoutCache {
             font_size,
             runs,
             wrap_width,
+            max_lines,
+            line_break_strategy,
             force_width: None,
         } as &dyn AsCacheKeyRef;
 
@@ -844,6 +871,7 @@ impl LineLayoutCache {
                     unwrapped_layout,
                     wrap_width,
                     max_lines,
+                    line_break_strategy,
                 ))
             } else {
                 let wrap_boundaries = if let Some(wrap_width) = wrap_width {
@@ -851,6 +879,7 @@ impl LineLayoutCache {
                         text.as_ref(),
                         wrap_width,
                         max_lines,
+                        line_break_strategy,
                         &mut self.wrap_scratch.borrow_mut(),
                     )
                 } else {
@@ -869,6 +898,8 @@ impl LineLayoutCache {
                 font_size,
                 runs: SmallVec::from(runs),
                 wrap_width,
+                max_lines,
+                line_break_strategy,
                 force_width: None,
             });
 
@@ -900,6 +931,8 @@ impl LineLayoutCache {
             font_size,
             runs,
             wrap_width: None,
+            max_lines: None,
+            line_break_strategy: LineBreakStrategy::Greedy,
             force_width,
         } as &dyn AsCacheKeyRef;
 
@@ -931,6 +964,8 @@ impl LineLayoutCache {
                 font_size,
                 runs: SmallVec::from(runs),
                 wrap_width: None,
+                max_lines: None,
+                line_break_strategy: LineBreakStrategy::Greedy,
                 force_width,
             });
             let layout = Arc::new(layout);
@@ -944,15 +979,22 @@ impl LineLayoutCache {
     /// direction (UAX #9 P2 and P3), and its runs record their directions.
     fn shape(&self, text: &str, font_size: Pixels, runs: &[FontRun]) -> LineLayout {
         if !bidi::has_rtl(text) {
-            let mut layout = self
-                .platform_text_system
-                .layout_line(text, font_size, runs);
+            let mut layout = self.platform_text_system.layout_line(text, font_size, runs);
             apply_run_fonts(&mut layout, runs);
             apply_run_padding(&mut layout, runs);
             apply_letter_spacing(&mut layout, text, runs);
             return layout;
         }
-        let rtl = bidi::paragraph_is_rtl(text);
+        self.shape_in_direction(text, font_size, runs, bidi::paragraph_is_rtl(text))
+    }
+
+    fn shape_in_direction(
+        &self,
+        text: &str,
+        font_size: Pixels,
+        runs: &[FontRun],
+        rtl: bool,
+    ) -> LineLayout {
         let mut layout = self
             .platform_text_system
             .layout_line_in_direction(text, font_size, runs, rtl);
@@ -975,6 +1017,7 @@ impl LineLayoutCache {
         unwrapped: Arc<LineLayout>,
         wrap_width: Option<Pixels>,
         max_lines: Option<usize>,
+        line_break_strategy: LineBreakStrategy,
     ) -> WrappedLineLayout {
         let rtl = bidi::paragraph_is_rtl(text);
         let single = |unwrapped_layout| WrappedLineLayout {
@@ -987,7 +1030,7 @@ impl LineLayoutCache {
         let Some(wrap_width) = wrap_width.filter(|width| unwrapped.width > *width) else {
             return single(unwrapped);
         };
-        let lines = bidi::wrap_logically(
+        let mut lines = bidi::wrap_logically(
             text,
             &unwrapped,
             wrap_width,
@@ -996,6 +1039,36 @@ impl LineLayoutCache {
         );
         if lines.len() < 2 {
             return single(unwrapped);
+        }
+        if line_break_strategy == LineBreakStrategy::AvoidWidows {
+            let previous = lines.len() - 2;
+            let last = lines.len() - 1;
+            let clusters: FxHashSet<_> = unwrapped
+                .runs
+                .iter()
+                .flat_map(|run| run.glyphs.iter().map(|glyph| glyph.index))
+                .collect();
+            let breaks: Vec<_> = LineWrapper::break_indices(text)
+                .filter(|index| clusters.contains(index))
+                .collect();
+            if let Some(start) = avoid_widow(
+                text,
+                lines[previous].start,
+                lines[last].start,
+                &breaks,
+                |start| {
+                    let range = start..text.trim_end_matches(' ').len();
+                    let tail_runs = bidi::runs_in(runs, range.clone());
+                    // A different line can reshape ligatures, joining, and padding. Measure
+                    // that exact line in the paragraph's direction before moving the break.
+                    self.shape_in_direction(&text[range], font_size, &tail_runs, rtl)
+                        .width
+                        <= wrap_width
+                },
+            ) {
+                lines[previous].end = start;
+                lines[last].start = start;
+            }
         }
         let mut combined = LineLayout {
             font_size,
@@ -1014,16 +1087,7 @@ impl LineLayoutCache {
             let shaped = range.start..range.start + text[range.clone()].trim_end_matches(' ').len();
             let line_runs = bidi::runs_in(runs, shaped.clone());
             let line_text = &text[shaped];
-            let mut line = self.platform_text_system.layout_line_in_direction(
-                line_text,
-                font_size,
-                &line_runs,
-                rtl,
-            );
-            apply_run_fonts(&mut line, &line_runs);
-            apply_run_padding(&mut line, &line_runs);
-            apply_letter_spacing(&mut line, line_text, &line_runs);
-            bidi::mark_run_directions(&mut line, line_text, rtl);
+            let line = self.shape_in_direction(line_text, font_size, &line_runs, rtl);
             if line.runs.iter().all(|run| run.glyphs.is_empty()) {
                 continue;
             }
@@ -1282,6 +1346,8 @@ struct CacheKey {
     font_size: Pixels,
     runs: SmallVec<[FontRun; 1]>,
     wrap_width: Option<Pixels>,
+    max_lines: Option<usize>,
+    line_break_strategy: LineBreakStrategy,
     force_width: Option<Pixels>,
 }
 
@@ -1291,6 +1357,8 @@ struct CacheKeyRef<'a> {
     font_size: Pixels,
     runs: &'a [FontRun],
     wrap_width: Option<Pixels>,
+    max_lines: Option<usize>,
+    line_break_strategy: LineBreakStrategy,
     force_width: Option<Pixels>,
 }
 
@@ -1315,6 +1383,8 @@ impl AsCacheKeyRef for CacheKey {
             font_size: self.font_size,
             runs: self.runs.as_slice(),
             wrap_width: self.wrap_width,
+            max_lines: self.max_lines,
+            line_break_strategy: self.line_break_strategy,
             force_width: self.force_width,
         }
     }
@@ -1395,7 +1465,13 @@ mod tests {
         layout.len = "你好".len();
         assert_eq!(
             layout
-                .compute_wrap_boundaries("你好", px(15.), None, &mut WrapScratch::default())
+                .compute_wrap_boundaries(
+                    "你好",
+                    px(15.),
+                    None,
+                    LineBreakStrategy::Greedy,
+                    &mut WrapScratch::default()
+                )
                 .as_slice(),
             &[WrapBoundary {
                 run_ix: 0,
@@ -1408,7 +1484,13 @@ mod tests {
         layout.len = 1;
         assert!(
             layout
-                .compute_wrap_boundaries("a", px(10.), None, &mut WrapScratch::default())
+                .compute_wrap_boundaries(
+                    "a",
+                    px(10.),
+                    None,
+                    LineBreakStrategy::Greedy,
+                    &mut WrapScratch::default()
+                )
                 .is_empty()
         );
     }
@@ -1429,7 +1511,13 @@ mod tests {
             layout.width = px(indices.len() as f32 * 10.);
             layout.len = text.len();
             assert_eq!(
-                layout.compute_wrap_boundaries(text, px(40.), None, &mut WrapScratch::default()),
+                layout.compute_wrap_boundaries(
+                    text,
+                    px(40.),
+                    None,
+                    LineBreakStrategy::Greedy,
+                    &mut WrapScratch::default()
+                ),
                 expected_boundaries
                     .into_iter()
                     .map(|glyph_ix| WrapBoundary {
@@ -1455,13 +1543,157 @@ mod tests {
         layout.len = text.len();
         assert_eq!(
             layout
-                .compute_wrap_boundaries(text, px(60.), None, &mut WrapScratch::default())
+                .compute_wrap_boundaries(
+                    text,
+                    px(60.),
+                    None,
+                    LineBreakStrategy::Greedy,
+                    &mut WrapScratch::default()
+                )
                 .as_slice(),
             &[WrapBoundary {
                 run_ix: 0,
                 glyph_ix: 2
             }],
         );
+    }
+
+    #[test]
+    fn test_avoid_widows_uses_shaped_legal_breaks_without_changing_glyphs() {
+        for text in [
+            "Cite your sources when you share data.",
+            "Use that as your north star when you debate.",
+            "No messages found. Try another term or filter.",
+            "you should post it in #research so it doesn't get buried",
+            "one 👨‍👩‍👧‍👦 two e\u{301}cho data.",
+            "one more two\u{a0}three data.",
+        ] {
+            let glyphs: Vec<_> = text
+                .grapheme_indices(true)
+                .enumerate()
+                .map(|(cell, (index, _))| glyph_at(cell as f32 * 10., index))
+                .collect();
+            let last_word = text.unicode_word_indices().last().unwrap().0;
+            let mut layout = make_layout(glyphs);
+            layout.width = px(text.graphemes(true).count() as f32 * 10.);
+            layout.len = text.len();
+            let width = layout.x_for_index(last_word);
+            let greedy = layout.compute_wrap_boundaries(
+                text,
+                width,
+                None,
+                LineBreakStrategy::Greedy,
+                &mut WrapScratch::default(),
+            );
+            let adjusted = layout.compute_wrap_boundaries(
+                text,
+                width,
+                None,
+                LineBreakStrategy::AvoidWidows,
+                &mut WrapScratch::default(),
+            );
+            assert_eq!(greedy.len(), 1, "{text}");
+            assert_eq!(adjusted.len(), 1, "{text}");
+            let boundary = adjusted.last().unwrap();
+            let start = layout.runs[boundary.run_ix].glyphs[boundary.glyph_ix].index;
+            assert!(start < last_word, "{text}");
+            assert!(LineWrapper::break_indices(text).any(|index| index == start));
+            assert!(text.grapheme_indices(true).any(|(index, _)| index == start));
+            assert!(text[start..].unicode_words().count() >= 2);
+            assert!(layout.width - layout.x_for_index(start) <= width);
+            assert_eq!(
+                glyph_x_positions(&layout),
+                (0..text.graphemes(true).count())
+                    .map(|index| index as f32 * 10.)
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn test_avoid_widows_does_not_split_a_nonbreaking_phrase_to_force_a_fit() {
+        let text = "one two\u{a0}three data.";
+        let mut layout = make_layout(
+            text.grapheme_indices(true)
+                .enumerate()
+                .map(|(cell, (index, _))| glyph_at(cell as f32 * 10., index))
+                .collect(),
+        );
+        layout.width = px(text.graphemes(true).count() as f32 * 10.);
+        layout.len = text.len();
+        let width = layout.x_for_index(text.find("data").unwrap());
+        let greedy = layout.compute_wrap_boundaries(
+            text,
+            width,
+            None,
+            LineBreakStrategy::Greedy,
+            &mut WrapScratch::default(),
+        );
+        let adjusted = layout.compute_wrap_boundaries(
+            text,
+            width,
+            None,
+            LineBreakStrategy::AvoidWidows,
+            &mut WrapScratch::default(),
+        );
+        assert_eq!(adjusted, greedy);
+    }
+
+    #[test]
+    fn test_avoid_widows_keeps_the_ltr_painted_extent_within_width() {
+        let text = "a abcdef ghi ";
+        let mut layout = make_layout(
+            text.char_indices()
+                .map(|(index, _)| glyph_at(index as f32, index))
+                .collect(),
+        );
+        layout.width = px(text.len() as f32);
+        layout.len = text.len();
+        let greedy = layout.compute_wrap_boundaries(
+            text,
+            px(10.),
+            None,
+            LineBreakStrategy::Greedy,
+            &mut WrapScratch::default(),
+        );
+        let adjusted = layout.compute_wrap_boundaries(
+            text,
+            px(10.),
+            None,
+            LineBreakStrategy::AvoidWidows,
+            &mut WrapScratch::default(),
+        );
+        assert_eq!(adjusted, greedy);
+        assert_eq!(layout.runs[0].glyphs[adjusted[0].glyph_ix].index, 9);
+    }
+
+    #[test]
+    fn test_wrap_cache_identity_includes_strategy_and_line_limit() {
+        let key = CacheKeyRef {
+            text: "one two three",
+            font_size: px(14.),
+            runs: &[],
+            wrap_width: Some(px(50.)),
+            force_width: None,
+            max_lines: None,
+            line_break_strategy: LineBreakStrategy::Greedy,
+        };
+        let variants = [
+            key,
+            CacheKeyRef {
+                line_break_strategy: LineBreakStrategy::AvoidWidows,
+                ..key
+            },
+            CacheKeyRef {
+                max_lines: Some(1),
+                ..key
+            },
+            CacheKeyRef {
+                max_lines: Some(2),
+                ..key
+            },
+        ];
+        assert_eq!(variants.into_iter().collect::<FxHashSet<_>>().len(), 4);
     }
 
     #[test]
