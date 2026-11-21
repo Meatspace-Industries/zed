@@ -138,11 +138,24 @@ impl Scene {
             .push(PaintOperation::Primitive(primitive));
     }
 
-    pub fn replay(&mut self, range: Range<usize>, prev_scene: &Scene) {
+    /// Paints `range` of `prev_scene` again, moved by `offset`, a whole number of device pixels:
+    /// each primitive, its content mask and its layer move, and take their draw order from where
+    /// they now stand.
+    pub fn replay(&mut self, range: Range<usize>, prev_scene: &Scene, offset: Point<ScaledPixels>) {
+        let moved = offset != Point::default();
         for operation in &prev_scene.paint_operations[range] {
             match operation {
+                PaintOperation::Primitive(primitive) if moved => {
+                    let mut primitive = primitive.clone();
+                    primitive.translate(offset);
+                    self.insert_primitive(primitive)
+                }
                 PaintOperation::Primitive(primitive) => self.insert_primitive(primitive.clone()),
-                PaintOperation::StartLayer(bounds) => self.push_layer(*bounds),
+                PaintOperation::StartLayer(bounds) => {
+                    let mut bounds = *bounds;
+                    bounds.origin += offset;
+                    self.push_layer(bounds)
+                }
                 PaintOperation::EndLayer => self.pop_layer(),
             }
         }
@@ -243,6 +256,41 @@ impl Primitive {
             Primitive::PolychromeSprite(sprite) => &sprite.bounds,
             Primitive::Surface(surface) => &surface.bounds,
         }
+    }
+
+    /// Moves the primitive by `offset`: its bounds, its content mask, and the positions that a
+    /// path's vertices or a shadow's element hold (a vertex's own mask is unused once painted,
+    /// as a render leaves it). A sprite with a transformation keeps drawing about its moved
+    /// bounds.
+    pub fn translate(&mut self, offset: Point<ScaledPixels>) {
+        let (bounds, content_mask) = match self {
+            Primitive::Shadow(shadow) => {
+                shadow.element_bounds.origin += offset;
+                (&mut shadow.bounds, &mut shadow.content_mask)
+            }
+            Primitive::Quad(quad) => (&mut quad.bounds, &mut quad.content_mask),
+            Primitive::Path(path) => {
+                for vertex in &mut path.vertices {
+                    vertex.xy_position += offset;
+                }
+                path.start += offset;
+                path.current += offset;
+                (&mut path.bounds, &mut path.content_mask)
+            }
+            Primitive::Underline(underline) => (&mut underline.bounds, &mut underline.content_mask),
+            Primitive::MonochromeSprite(sprite) => {
+                sprite.transformation = sprite.transformation.moved(offset);
+                (&mut sprite.bounds, &mut sprite.content_mask)
+            }
+            Primitive::SubpixelSprite(sprite) => {
+                sprite.transformation = sprite.transformation.moved(offset);
+                (&mut sprite.bounds, &mut sprite.content_mask)
+            }
+            Primitive::PolychromeSprite(sprite) => (&mut sprite.bounds, &mut sprite.content_mask),
+            Primitive::Surface(surface) => (&mut surface.bounds, &mut surface.content_mask),
+        };
+        bounds.origin += offset;
+        content_mask.bounds.origin += offset;
     }
 
     pub fn content_mask(&self) -> &ContentMask<ScaledPixels> {
@@ -682,6 +730,24 @@ impl TransformationMatrix {
                 self.translation[1]
                     + self.rotation_scale[1][0] * other.translation[0]
                     + self.rotation_scale[1][1] * other.translation[1],
+            ],
+        }
+    }
+
+    /// The transformation that draws content moved by `offset` as `self` drew it before the
+    /// move. The shaders transform positions, bounds origin included, so a rotation or a scale
+    /// would carry the move along with it: the translation takes it back out.
+    pub fn moved(self, offset: Point<ScaledPixels>) -> Self {
+        if self == Self::unit() {
+            return self;
+        }
+        let [[a, b], [c, d]] = self.rotation_scale;
+        let (x, y) = (offset.x.0, offset.y.0);
+        Self {
+            rotation_scale: self.rotation_scale,
+            translation: [
+                self.translation[0] + x - (a * x + b * y),
+                self.translation[1] + y - (c * x + d * y),
             ],
         }
     }

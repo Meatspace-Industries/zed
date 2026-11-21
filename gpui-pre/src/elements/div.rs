@@ -4078,7 +4078,8 @@ fn show_tooltip(
         ActiveTooltip::Visible {
             tooltip: AnyTooltip {
                 view,
-                mouse_position: window.mouse_position(),
+                // The window's pointer, also when a moved view's listener shows the tooltip.
+                mouse_position: window.mouse_position,
                 check_visible_and_update: Rc::new(move |tooltip_bounds, window, cx| {
                     if long_press_tooltip_active
                         .as_ref()

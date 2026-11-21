@@ -1,7 +1,7 @@
 use crate::{
     AnyElement, AnyEntity, AnyWeakEntity, App, AvailableSpace, Bounds, ContentMask, Context,
     Element, ElementId, Entity, EntityId, GlobalElementId, InspectorElementId, IntoElement,
-    LayoutId, PaintIndex, Pixels, PrepaintStateIndex, Render, RenderOnce, Size, Style,
+    LayoutId, PaintIndex, Pixels, Point, PrepaintStateIndex, Render, RenderOnce, Size, Style,
     StyleRefinement, TextStyle, WeakEntity,
 };
 use crate::{Empty, Window};
@@ -327,13 +327,60 @@ struct ViewElementState {
     paint_range: Range<PaintIndex>,
     cache_key: ViewElementCacheKey,
     accessed_entities: FxHashSet<EntityId>,
+    /// How far this frame's prepaint moved the reused output from where the last frame drew it.
+    /// Paint replays by the same offset. Zero unless the view replays at a moved origin.
+    reuse_offset: Point<Pixels>,
 }
 
 struct ViewElementCacheKey {
+    /// The view's bounds when it last drew, its origin included.
     bounds: Bounds<Pixels>,
     content_mask: ContentMask<Pixels>,
     text_style: TextStyle,
     opacity: f32,
+}
+
+/// The most that a replayed position may differ from a whole device pixel, in device pixels.
+/// Positions here come from layout, which snaps them to device pixels, so only float rounding
+/// remains.
+const DEVICE_PIXEL_EPSILON: f32 = 0.01;
+
+impl ViewElementCacheKey {
+    /// The offset by which the last frame's output, `range`, stands for the view laid out at
+    /// `bounds` under `content_mask`: zero when neither changed. While the window replays moved
+    /// views ([`Window::set_replay_moved_views`]), also the move of a view whose size and whose
+    /// clip relative to its origin are unchanged, when that move is a whole number of device
+    /// pixels, so every replayed glyph lands on the same device pixels, and the output deferred
+    /// no draw, which would paint under the window's clip rather than the view's. `None`
+    /// otherwise: the view renders again.
+    fn reuse_offset(
+        &self,
+        range: &Range<PrepaintStateIndex>,
+        bounds: Bounds<Pixels>,
+        content_mask: &ContentMask<Pixels>,
+        window: &Window,
+    ) -> Option<Point<Pixels>> {
+        if self.bounds.origin == bounds.origin {
+            return (self.bounds.size == bounds.size && self.content_mask == *content_mask)
+                .then(Point::default);
+        }
+        if !window.replay_moved_views || self.bounds.size != bounds.size || Window::defers(range) {
+            return None;
+        }
+        let scale = window.scale_factor();
+        let device = |value: Pixels| f32::from(value) * scale;
+        let whole = |value: f32| (value - value.round()).abs() <= DEVICE_PIXEL_EPSILON;
+        let same = |a: Pixels, b: Pixels| (device(a) - device(b)).abs() <= DEVICE_PIXEL_EPSILON;
+        let offset = bounds.origin - self.bounds.origin;
+        let (old, new) = (self.content_mask.bounds, content_mask.bounds);
+        (whole(device(offset.x))
+            && whole(device(offset.y))
+            && same(new.origin.x - old.origin.x, offset.x)
+            && same(new.origin.y - old.origin.y, offset.y)
+            && same(new.size.width, old.size.width)
+            && same(new.size.height, old.size.height))
+        .then_some(offset)
+    }
 }
 
 #[cfg(not(gpui_hot_reload))]
@@ -550,23 +597,34 @@ fn prepaint_view(
                 // Opacity is compared by bits so that a NaN opacity still matches itself
                 // and the view keeps using its cache.
                 if let Some(mut element_state) = element_state
-                    && element_state.cache_key.bounds == bounds
-                    && element_state.cache_key.content_mask == content_mask
                     && element_state.cache_key.text_style == text_style
                     && element_state.cache_key.opacity.to_bits() == opacity.to_bits()
                     && !window.dirty_views.contains(&entity_id)
                     && !window.refreshing
+                    && let Some(offset) = element_state.cache_key.reuse_offset(
+                        &element_state.prepaint_range,
+                        bounds,
+                        &content_mask,
+                        window,
+                    )
                 {
                     let prepaint_start = window.prepaint_index();
-                    window.reuse_prepaint(element_state.prepaint_range.clone());
+                    window.reuse_prepaint(element_state.prepaint_range.clone(), offset);
                     cx.entities
                         .extend_accessed(&element_state.accessed_entities);
                     let prepaint_end = window.prepaint_index();
                     element_state.prepaint_range = prepaint_start..prepaint_end;
+                    element_state.reuse_offset = offset;
+                    if offset != Point::default() {
+                        element_state.cache_key.bounds = bounds;
+                        element_state.cache_key.content_mask = content_mask;
+                        window.replayed_moved_views.insert(entity_id);
+                    }
 
                     return (None, element_state);
                 }
 
+                window.replayed_moved_views.remove(&entity_id);
                 let refreshing = mem::replace(&mut window.refreshing, true);
                 let prepaint_start = window.prepaint_index();
                 let (element, accessed_entities) = cx.detect_accessed_entities(|cx| {
@@ -591,6 +649,7 @@ fn prepaint_view(
                             text_style,
                             opacity,
                         },
+                        reuse_offset: Point::default(),
                     },
                 )
             },
@@ -642,7 +701,10 @@ fn paint_view(
                         window.refreshing = refreshing;
                         element_state.cache_key.opacity = opacity;
                     } else {
-                        window.reuse_paint(element_state.paint_range.clone());
+                        window.reuse_paint(
+                            element_state.paint_range.clone(),
+                            element_state.reuse_offset,
+                        );
                         if element_state.cache_key.opacity.to_bits() != opacity.to_bits() {
                             window.request_animation_frame();
                         }
@@ -670,4 +732,78 @@ fn paint_component(
     window.with_id(ElementId::Name(name.into()), |window| {
         element.as_mut().unwrap().paint(window, cx);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{TestAppContext, point, px, size};
+
+    /// The key of a view drawn at (10, 20), 100 × 50, clipped to itself.
+    fn key() -> ViewElementCacheKey {
+        let bounds = Bounds::new(point(px(10.), px(20.)), size(px(100.), px(50.)));
+        ViewElementCacheKey {
+            bounds,
+            content_mask: ContentMask { bounds },
+            text_style: TextStyle::default(),
+            opacity: 1.,
+        }
+    }
+
+    #[crate::test]
+    fn a_moved_view_replays_only_by_whole_device_pixels_with_its_clip(cx: &mut TestAppContext) {
+        let window = cx.add_empty_window();
+        window.update(|window, _| {
+            let key = key();
+            let empty = PrepaintStateIndex::default()..PrepaintStateIndex::default();
+            let at = |x: f32, y: f32| Bounds::new(point(px(x), px(y)), size(px(100.), px(50.)));
+            let clip = |bounds: Bounds<Pixels>| ContentMask { bounds };
+
+            // In place: reused as before, also while replay is off; a changed clip renders.
+            assert_eq!(
+                key.reuse_offset(&empty, at(10., 20.), &clip(at(10., 20.)), window),
+                Some(Point::default())
+            );
+            let mut narrower = at(10., 20.);
+            narrower.size.width = px(90.);
+            assert_eq!(
+                key.reuse_offset(&empty, at(10., 20.), &clip(narrower), window),
+                None
+            );
+
+            // Moved, with replay off: renders.
+            assert_eq!(
+                key.reuse_offset(&empty, at(40.5, 20.), &clip(at(40.5, 20.)), window),
+                None
+            );
+
+            window.set_replay_moved_views(true);
+            // At scale 2, 30.5 px is 61 device px: replayed by the move.
+            assert_eq!(
+                key.reuse_offset(&empty, at(40.5, 20.), &clip(at(40.5, 20.)), window),
+                Some(point(px(30.5), px(0.)))
+            );
+            // 0.25 px is half a device px: renders, so no glyph lands between pixels.
+            assert_eq!(
+                key.reuse_offset(&empty, at(10.25, 20.), &clip(at(10.25, 20.)), window),
+                None
+            );
+            // A new size renders.
+            let mut wider = at(40.5, 20.);
+            wider.size.width = px(101.);
+            assert_eq!(key.reuse_offset(&empty, wider, &clip(wider), window), None);
+            // A clip that stays while the view moves (a parent's edge now cuts it) renders.
+            assert_eq!(
+                key.reuse_offset(&empty, at(40.5, 20.), &clip(at(10., 20.)), window),
+                None
+            );
+            // Output that deferred a draw, which paints under the window's clip, renders.
+            let mut deferring = empty.clone();
+            deferring.end.deferred_draws_index = 1;
+            assert_eq!(
+                key.reuse_offset(&deferring, at(40.5, 20.), &clip(at(40.5, 20.)), window),
+                None
+            );
+        });
+    }
 }

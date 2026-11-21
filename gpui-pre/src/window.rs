@@ -8,22 +8,24 @@ use crate::subscription::SingleSubscriberSet;
 use crate::taffy::TaffyLayoutEngine;
 use crate::{
     Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext, Arena, Asset,
-    AsyncWindowContext, AtlasTile, AvailableSpace, Background, BorderStyle, Bounds, BoxShadow,
-    Capslock, Context, Corners, CursorHideMode, CursorStyle, DecorationRun, Decorations,
-    DevicePixels, DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId, Edges, Effect,
-    Entity, EntityId, EventEmitter, FileDropEvent, FontId, Global, GlobalElementId, GlyphId,
-    GpuSpecs, Hsla, InputHandler, InputPreference, IsZero, KeyBinding, KeyContext, KeyDownEvent,
-    KeyEvent, Keystroke, KeystrokeEvent, LayoutId, LineLayout, LineLayoutIndex, Modifiers,
-    ModifiersChangedEvent, MonochromeSprite, MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent,
-    Path, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler,
+    AsyncWindowContext, AtlasTile, AvailableSpace, BackGestureEvent, Background, BorderStyle,
+    Bounds, BoxShadow, Capslock, Context, Corners, CursorHideMode, CursorStyle, DecorationRun,
+    Decorations, DevicePixels, DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId,
+    Edges, Effect, Entity, EntityId, EventEmitter, FileDropEvent, FontId, Global, GlobalElementId,
+    GlyphId, GpuSpecs, Hsla, InputHandler, InputPreference, IsZero, KeyBinding, KeyContext,
+    KeyDownEvent, KeyEvent, Keystroke, KeystrokeEvent, LayoutId, LineLayout, LineLayoutIndex,
+    LongPressEvent, Modifiers, ModifiersChangedEvent, MonochromeSprite, MouseButton,
+    MouseDownEvent, MouseEvent, MouseExitEvent, MouseMoveEvent, MousePressureEvent, MouseUpEvent,
+    Path, PinchEvent, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler,
     PlatformWindow, Point, PolychromeSprite, Priority, PromptButton, PromptLevel, Quad, Render,
     RenderGlyphParams, RenderImage, RenderImageParams, RenderSvgParams, Replay, ResizeEdge,
-    SMOOTH_SVG_SCALE_FACTOR, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, Shadow,
-    SharedString, Size, StrikethroughStyle, Style, SubpixelSprite, Subscription, SystemWindowTab,
-    SystemWindowTabController, TabStopMap, Task, TextInputConfiguration, TextInputStateChange,
-    TextRenderingMode, TextStyle, TextStyleRefinement, ThermalState, TransformationMatrix,
-    Underline, UnderlineStyle, WindowAppearance, WindowBackgroundAppearance, WindowBounds,
-    WindowControls, WindowDecorations, WindowInsets, WindowOptions, WindowParams, WindowTextSystem,
+    SMOOTH_SVG_SCALE_FACTOR, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene,
+    ScrollEvent, Shadow, SharedString, Size, StrikethroughStyle, Style, SubpixelSprite,
+    Subscription, SystemWindowTab, SystemWindowTabController, TabStopMap, Task,
+    TextInputConfiguration, TextInputStateChange, TextRenderingMode, TextStyle,
+    TextStyleRefinement, ThermalState, TouchDragEvent, TransformationMatrix, Underline,
+    UnderlineStyle, WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControls,
+    WindowDecorations, WindowInsets, WindowOptions, WindowParams, WindowTextSystem,
     WindowVisibility, point, prelude::*, px, rems, size, transparent_black,
 };
 
@@ -959,8 +961,7 @@ impl TooltipId {
             .tooltip_bounds
             .as_ref()
             .is_some_and(|tooltip_bounds| {
-                tooltip_bounds.id == *self
-                    && tooltip_bounds.bounds.contains(&window.mouse_position())
+                tooltip_bounds.id == *self && tooltip_bounds.bounds.contains(&window.mouse_position)
             })
     }
 }
@@ -974,6 +975,10 @@ pub(crate) struct TooltipBounds {
 pub(crate) struct TooltipRequest {
     id: TooltipId,
     tooltip: AnyTooltip,
+    /// How far the view that set the tooltip moved since it set it (see
+    /// [`Window::set_replay_moved_views`]): its visibility check runs in the view's own frame
+    /// of reference.
+    offset: Point<Pixels>,
 }
 
 /// The ids of the elements being drawn, root first, with the hash of every
@@ -1038,12 +1043,82 @@ pub(crate) struct DeferredDraw {
     paint_range: Range<PaintIndex>,
 }
 
+/// A mouse listener registered during paint.
+pub(crate) struct MouseListener {
+    /// How far the view that registered the listener moved since it did (see
+    /// [`Window::set_replay_moved_views`]). Events reach the listener with their positions less
+    /// this offset, and [`Window::mouse_position`] answers the same inside it, so they match
+    /// the bounds that the listener captured.
+    offset: Point<Pixels>,
+    callback: AnyMouseListener,
+}
+
+/// A copy of `event`, a mouse event, with every position in it moved by `offset`. `None` for an
+/// event with no position.
+fn moved_mouse_event(event: &dyn Any, offset: Point<Pixels>) -> Option<Box<dyn Any>> {
+    fn moved<E: Clone + 'static>(
+        event: &dyn Any,
+        offset: Point<Pixels>,
+        positions: impl FnOnce(&mut E) -> Vec<&mut Point<Pixels>>,
+    ) -> Option<Box<dyn Any>> {
+        let mut event = event.downcast_ref::<E>()?.clone();
+        for position in positions(&mut event) {
+            *position += offset;
+        }
+        Some(Box::new(event))
+    }
+    moved(event, offset, |e: &mut MouseDownEvent| {
+        vec![&mut e.position]
+    })
+    .or_else(|| moved(event, offset, |e: &mut MouseUpEvent| vec![&mut e.position]))
+    .or_else(|| {
+        moved(event, offset, |e: &mut MouseMoveEvent| {
+            vec![&mut e.position]
+        })
+    })
+    .or_else(|| moved(event, offset, |e: &mut ScrollEvent| vec![&mut e.position]))
+    .or_else(|| {
+        moved(event, offset, |e: &mut MousePressureEvent| {
+            vec![&mut e.position]
+        })
+    })
+    .or_else(|| moved(event, offset, |e: &mut PinchEvent| vec![&mut e.position]))
+    .or_else(|| {
+        moved(event, offset, |e: &mut MouseExitEvent| {
+            vec![&mut e.position]
+        })
+    })
+    .or_else(|| {
+        moved(event, offset, |e: &mut TouchDragEvent| {
+            vec![&mut e.start_position, &mut e.position]
+        })
+    })
+    .or_else(|| {
+        moved(event, offset, |e: &mut LongPressEvent| {
+            vec![&mut e.start_position, &mut e.position]
+        })
+    })
+    .or_else(|| {
+        moved(event, offset, |e: &mut BackGestureEvent| {
+            vec![&mut e.start_position]
+        })
+    })
+    .or_else(|| {
+        moved(event, offset, |e: &mut FileDropEvent| match e {
+            FileDropEvent::Entered { position, .. }
+            | FileDropEvent::Pending { position }
+            | FileDropEvent::Submit { position } => vec![position],
+            FileDropEvent::Exited | FileDropEvent::Ended => Vec::new(),
+        })
+    })
+}
+
 pub(crate) struct Frame {
     pub(crate) focus: Option<FocusId>,
     pub(crate) window_active: bool,
     pub(crate) element_states: FxHashMap<(GlobalElementId, TypeId), ElementStateBox>,
     accessed_element_states: Vec<(GlobalElementId, TypeId)>,
-    pub(crate) mouse_listeners: Vec<Option<AnyMouseListener>>,
+    pub(crate) mouse_listeners: Vec<Option<MouseListener>>,
     pub(crate) dispatch_tree: DispatchTree,
     pub(crate) scene: Scene,
     pub(crate) hitboxes: Vec<Hitbox>,
@@ -1069,7 +1144,7 @@ pub(crate) struct Frame {
 pub(crate) struct PrepaintStateIndex {
     hitboxes_index: usize,
     tooltips_index: usize,
-    deferred_draws_index: usize,
+    pub(crate) deferred_draws_index: usize,
     dispatch_tree_index: usize,
     accessed_element_states_index: usize,
     line_layout_index: LineLayoutIndex,
@@ -1270,7 +1345,11 @@ pub struct Window {
     pub(crate) focus_lost_listeners: SingleSubscriberSet<AnyObserver>,
     focus_lost_path: SmallVec<[FocusId; 8]>,
     default_prevented: bool,
-    mouse_position: Point<Pixels>,
+    pub(crate) mouse_position: Point<Pixels>,
+    /// While a mouse listener of a view that replays at a moved origin runs, how far the view
+    /// moved since it registered the listener: [`Window::mouse_position`] answers in the
+    /// listener's own frame of reference.
+    mouse_position_offset: Point<Pixels>,
     mouse_hit_test: HitTest,
     modifiers: Modifiers,
     capslock: Capslock,
@@ -1296,6 +1375,11 @@ pub struct Window {
     long_press_timer: Option<Task<()>>,
     long_press_capture: Option<EntityId>,
     pub(crate) refreshing: bool,
+    /// See [`Window::set_replay_moved_views`].
+    pub(crate) replay_moved_views: bool,
+    /// The cached views that replayed their last frame at a moved origin since they last
+    /// rendered.
+    pub(crate) replayed_moved_views: FxHashSet<EntityId>,
     pub(crate) activation_observers: SingleSubscriberSet<AnyObserver>,
     pub(crate) focus: Option<FocusId>,
     focus_enabled: bool,
@@ -2399,6 +2483,7 @@ impl Window {
             focus_lost_path: SmallVec::new(),
             default_prevented: true,
             mouse_position,
+            mouse_position_offset: Point::default(),
             mouse_hit_test: HitTest::default(),
             modifiers,
             capslock,
@@ -2425,6 +2510,8 @@ impl Window {
             long_press_timer: None,
             long_press_capture: None,
             refreshing: false,
+            replay_moved_views: false,
+            replayed_moved_views: FxHashSet::default(),
             activation_observers: SingleSubscriberSet::new(),
             focus: None,
             focus_enabled: true,
@@ -2611,6 +2698,37 @@ impl Window {
             self.refreshing = true;
             self.invalidator.set_dirty(true);
         }
+    }
+
+    /// While `replay` is on, a cached view laid out at a new origin, with its size, its clip
+    /// relative to its origin, its text style and its opacity unchanged, nothing that made it
+    /// dirty and no deferred draw in its last frame, paints its last frame moved by whole device
+    /// pixels instead of rendering again: its scene, hitboxes, cursor styles, tooltips, input
+    /// handlers and mouse listeners move with it, and its mouse listeners see positions in the
+    /// frame of reference of the bounds that they captured. Turn it on for transient motion,
+    /// such as the items that a drag pushes. A replayed view keeps any other window position
+    /// that its last render recorded (scroll and list bounds, positions that its own state
+    /// recorded at prepaint, an overlay anchored to the window), so turning `replay` off marks
+    /// each view that replayed at a moved origin dirty: it renders where it now stands in the
+    /// next frame.
+    pub fn set_replay_moved_views(&mut self, replay: bool) {
+        if self.replay_moved_views == replay {
+            return;
+        }
+        self.replay_moved_views = replay;
+        if !replay && !self.replayed_moved_views.is_empty() {
+            for view in mem::take(&mut self.replayed_moved_views) {
+                self.mark_view_dirty(view);
+            }
+            if self.invalidator.not_drawing() {
+                self.invalidator.set_dirty(true);
+            }
+        }
+    }
+
+    /// Whether moved views replay their last frame. See [`Window::set_replay_moved_views`].
+    pub fn replays_moved_views(&self) -> bool {
+        self.replay_moved_views
     }
 
     /// Close this window.
@@ -3683,9 +3801,42 @@ impl Window {
         }));
     }
 
-    /// The position of the mouse relative to the window.
+    /// Calls a mouse listener. A listener of a view that replays at a moved origin gets the event
+    /// with its positions less the view's move, and [`Window::mouse_position`] answers the same
+    /// while it runs, so both match the bounds that it captured when the view last rendered.
+    fn call_mouse_listener(
+        &mut self,
+        listener: &mut MouseListener,
+        event: &dyn Any,
+        moved: &mut Option<(Point<Pixels>, Option<Box<dyn Any>>)>,
+        phase: DispatchPhase,
+        cx: &mut App,
+    ) {
+        if listener.offset == Point::default() {
+            (listener.callback)(event, phase, self, cx);
+            return;
+        }
+        if moved
+            .as_ref()
+            .is_none_or(|(offset, _)| *offset != listener.offset)
+        {
+            *moved = Some((listener.offset, moved_mouse_event(event, -listener.offset)));
+        }
+        let event = moved
+            .as_ref()
+            .and_then(|(_, event)| event.as_deref())
+            .unwrap_or(event);
+        let outer = mem::replace(&mut self.mouse_position_offset, listener.offset);
+        (listener.callback)(event, phase, self, cx);
+        self.mouse_position_offset = outer;
+    }
+
+    /// The position of the mouse relative to the window. Inside a mouse listener of a view that
+    /// replays its last frame at a moved origin ([`Window::set_replay_moved_views`]), the
+    /// position in the frame of reference of the bounds that the listener captured: less the
+    /// view's move.
     pub fn mouse_position(&self) -> Point<Pixels> {
-        self.mouse_position
+        self.mouse_position - self.mouse_position_offset
     }
 
     /// The hitboxes at `position` in the last drawn frame, topmost first. As in mouse dispatch,
@@ -4179,9 +4330,15 @@ impl Window {
 
             // It's possible for an element to have an active tooltip while not being painted (e.g.
             // via the `visible_on_hover` method). Since mouse listeners are not active in this
-            // case, instead update the tooltip's visibility here.
+            // case, instead update the tooltip's visibility here. The check compares the pointer
+            // with bounds that the view captured, so it runs with the view's move taken out.
+            let offset = tooltip_request.offset;
+            let outer = mem::replace(&mut self.mouse_position_offset, offset);
+            let mut checked_bounds = tooltip_bounds;
+            checked_bounds.origin -= offset;
             let is_visible =
-                (tooltip_request.tooltip.check_visible_and_update)(tooltip_bounds, self, cx);
+                (tooltip_request.tooltip.check_visible_and_update)(checked_bounds, self, cx);
+            self.mouse_position_offset = outer;
             if !is_visible {
                 continue;
             }
@@ -4256,7 +4413,7 @@ impl Window {
                     });
                     self.next_frame.deferred_draws[deferred_draw_ix].element = Some(element);
                 } else {
-                    self.reuse_prepaint(prepaint_range);
+                    self.reuse_prepaint(prepaint_range, Point::default());
                 }
                 let prepaint_end = self.prepaint_index();
                 self.next_frame.deferred_draws[deferred_draw_ix].prepaint_range =
@@ -4299,7 +4456,7 @@ impl Window {
                     })
                 })
             } else {
-                self.reuse_paint(deferred_draw.paint_range.clone());
+                self.reuse_paint(deferred_draw.paint_range.clone(), Point::default());
             }
             let paint_end = self.paint_index();
             deferred_draw.paint_range = paint_start..paint_end;
@@ -4528,6 +4685,11 @@ impl Window {
         }
     }
 
+    /// Whether the prepaint output in `range` deferred a draw.
+    pub(crate) fn defers(range: &Range<PrepaintStateIndex>) -> bool {
+        range.start.deferred_draws_index != range.end.deferred_draws_index
+    }
+
     pub(crate) fn prepaint_index(&self) -> PrepaintStateIndex {
         PrepaintStateIndex {
             hitboxes_index: self.next_frame.hitboxes.len(),
@@ -4540,7 +4702,17 @@ impl Window {
         }
     }
 
-    pub(crate) fn reuse_prepaint(&mut self, range: Range<PrepaintStateIndex>) {
+    /// Copies the prepaint output in `range` of the last frame into this one, moved by `offset`
+    /// (zero unless a view replays at a moved origin, see [`Window::set_replay_moved_views`]):
+    /// the positions it holds in window coordinates move, and the dispatch tree, focus, tab
+    /// stops and line layouts, which hold none, copy as they are. A range that moves holds no
+    /// deferred draw: those paint under the window's clip, not the view's, so a view that
+    /// deferred one renders at its new origin.
+    pub(crate) fn reuse_prepaint(
+        &mut self,
+        range: Range<PrepaintStateIndex>,
+        offset: Point<Pixels>,
+    ) {
         if self.frame_recording {
             let start = range.start.recorded_elements_index;
             let end = range.end.recorded_elements_index;
@@ -4551,6 +4723,7 @@ impl Window {
                     start,
                     self.next_frame.recorded_elements.len(),
                     self.record_stack.last().copied(),
+                    offset,
                 )
                 .collect::<Vec<_>>();
                 self.next_frame.recorded_elements.extend(reused);
@@ -4559,13 +4732,26 @@ impl Window {
         self.next_frame.hitboxes.extend(
             self.rendered_frame.hitboxes[range.start.hitboxes_index..range.end.hitboxes_index]
                 .iter()
-                .cloned(),
+                .map(|hitbox| {
+                    let mut hitbox = hitbox.clone();
+                    hitbox.bounds.origin += offset;
+                    hitbox.content_mask.bounds.origin += offset;
+                    hitbox
+                }),
         );
+        // A tooltip shows at the pointer's position when it opened, as a render would show it; its
+        // visibility check, which compares the pointer with bounds that the view captured, runs
+        // with the view's move taken out.
         self.next_frame.tooltip_requests.extend(
             self.rendered_frame.tooltip_requests
                 [range.start.tooltips_index..range.end.tooltips_index]
                 .iter_mut()
-                .map(|request| request.take()),
+                .map(|request| {
+                    request.take().map(|mut request| {
+                        request.offset += offset;
+                        request
+                    })
+                }),
         );
         self.next_frame.accessed_element_states.extend(
             self.rendered_frame.accessed_element_states[range.start.accessed_element_states_index
@@ -4621,7 +4807,11 @@ impl Window {
         }
     }
 
-    pub(crate) fn reuse_paint(&mut self, range: Range<PaintIndex>) {
+    /// Copies the paint output in `range` of the last frame into this one, moved by `offset`
+    /// (zero unless a view replays at a moved origin, see [`Window::set_replay_moved_views`]):
+    /// the scene's primitives and layers, the input handlers' bounds, and the positions that
+    /// reach the mouse listeners.
+    pub(crate) fn reuse_paint(&mut self, range: Range<PaintIndex>, offset: Point<Pixels>) {
         if let Some(reused) = self
             .rendered_frame
             .recorded_text_inputs
@@ -4636,8 +4826,10 @@ impl Window {
         for (selector, bounds) in &self.rendered_frame.debug_bounds_records
             [range.start.debug_bounds_index..range.end.debug_bounds_index]
         {
+            let mut bounds = *bounds;
+            bounds.origin += offset;
             self.next_frame
-                .record_debug_bounds(selector.clone(), *bounds);
+                .record_debug_bounds(selector.clone(), bounds);
         }
         self.next_frame.cursor_styles.extend(
             self.rendered_frame.cursor_styles
@@ -4649,13 +4841,23 @@ impl Window {
             self.rendered_frame.input_handlers
                 [range.start.input_handlers_index..range.end.input_handlers_index]
                 .iter_mut()
-                .map(|handler| handler.take()),
+                .map(|handler| {
+                    handler.take().map(|mut handler| {
+                        handler.offset += offset;
+                        handler
+                    })
+                }),
         );
         self.next_frame.mouse_listeners.extend(
             self.rendered_frame.mouse_listeners
                 [range.start.mouse_listeners_index..range.end.mouse_listeners_index]
                 .iter_mut()
-                .map(|listener| listener.take()),
+                .map(|listener| {
+                    listener.take().map(|mut listener| {
+                        listener.offset += offset;
+                        listener
+                    })
+                }),
         );
         self.next_frame.accessed_element_states.extend(
             self.rendered_frame.accessed_element_states[range.start.accessed_element_states_index
@@ -4670,9 +4872,16 @@ impl Window {
 
         self.text_system
             .reuse_layouts(range.start.line_layout_index..range.end.line_layout_index);
+        // Whole device pixels: `ViewElementCacheKey::reuse_offset` accepts no other move.
+        let scale = self.scale_factor();
+        let device_offset = point(
+            ScaledPixels((f32::from(offset.x) * scale).round()),
+            ScaledPixels((f32::from(offset.y) * scale).round()),
+        );
         self.next_frame.scene.replay(
             range.start.scene_index..range.end.scene_index,
             &self.rendered_frame.scene,
+            device_offset,
         );
     }
 
@@ -4721,9 +4930,11 @@ impl Window {
     pub fn set_tooltip(&mut self, tooltip: AnyTooltip) -> TooltipId {
         self.invalidator.debug_assert_prepaint();
         let id = TooltipId(post_inc(&mut self.next_tooltip_id.0));
-        self.next_frame
-            .tooltip_requests
-            .push(Some(TooltipRequest { id, tooltip }));
+        self.next_frame.tooltip_requests.push(Some(TooltipRequest {
+            id,
+            tooltip,
+            offset: Point::default(),
+        }));
         id
     }
 
@@ -6066,13 +6277,16 @@ impl Window {
     ) {
         self.invalidator.debug_assert_paint();
 
-        self.next_frame.mouse_listeners.push(Some(Box::new(
-            move |event: &dyn Any, phase: DispatchPhase, window: &mut Window, cx: &mut App| {
-                if let Some(event) = event.downcast_ref() {
-                    listener(event, phase, window, cx)
-                }
-            },
-        )));
+        self.next_frame.mouse_listeners.push(Some(MouseListener {
+            offset: Point::default(),
+            callback: Box::new(
+                move |event: &dyn Any, phase: DispatchPhase, window: &mut Window, cx: &mut App| {
+                    if let Some(event) = event.downcast_ref() {
+                        listener(event, phase, window, cx)
+                    }
+                },
+            ),
+        }));
     }
 
     /// Register a key event listener on this node for the next frame. The type of event
@@ -6583,12 +6797,15 @@ impl Window {
         }
 
         let mut mouse_listeners = mem::take(&mut self.rendered_frame.mouse_listeners);
+        // The event moved into the frame of reference of the last listeners' offset: the
+        // listeners of one replayed view share it.
+        let mut moved = None;
 
         // Capture phase, events bubble from back to front. Handlers for this phase are used for
         // special purposes, such as detecting events outside of a given Bounds.
         for listener in &mut mouse_listeners {
             let listener = listener.as_mut().unwrap();
-            listener(event, DispatchPhase::Capture, self, cx);
+            self.call_mouse_listener(listener, event, &mut moved, DispatchPhase::Capture, cx);
             if !cx.propagate_event {
                 break;
             }
@@ -6598,7 +6815,7 @@ impl Window {
         if cx.propagate_event {
             for listener in mouse_listeners.iter_mut().rev() {
                 let listener = listener.as_mut().unwrap();
-                listener(event, DispatchPhase::Bubble, self, cx);
+                self.call_mouse_listener(listener, event, &mut moved, DispatchPhase::Bubble, cx);
                 if !cx.propagate_event {
                     break;
                 }
@@ -10797,6 +11014,214 @@ mod tests {
         // the hover.
         let widen = |root: &mut Root, _: &mut Window, _: &mut Context<Root>| root.width = px(300.);
         assert_eq!(update_and_draw(window, &child, cx, widen).0, 1.);
+    }
+
+    /// A cached view under a clip that moves with it: a red target that records each press, with
+    /// the bounds that its prepaint saw, and, with `defer`, a blue deferred mark.
+    struct MovedChild {
+        renders: usize,
+        defer: bool,
+        presses: Rc<RefCell<Vec<(Point<Pixels>, Point<Pixels>, Bounds<Pixels>)>>>,
+        target: Rc<Cell<Bounds<Pixels>>>,
+    }
+
+    impl Render for MovedChild {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            use crate::prelude::FluentBuilder as _;
+            self.renders += 1;
+            let (presses, target) = (self.presses.clone(), self.target.clone());
+            let seen = self.target.clone();
+            div()
+                .size_full()
+                .child(
+                    div()
+                        .id("target")
+                        .size(px(20.))
+                        .bg(crate::rgb(0xff0000))
+                        .on_mouse_down(MouseButton::Left, move |event, window, _| {
+                            presses.borrow_mut().push((
+                                event.position,
+                                window.mouse_position(),
+                                seen.get(),
+                            ));
+                        })
+                        .child(
+                            canvas(move |bounds, _, _| target.set(bounds), |_, _, _, _| {})
+                                .size_full(),
+                        ),
+                )
+                .when(self.defer, |child| {
+                    child.child(crate::deferred(div().size(px(5.)).bg(crate::rgb(0x0000ff))))
+                })
+        }
+    }
+
+    struct MovedRoot {
+        origin: Point<Pixels>,
+        width: Pixels,
+        child: crate::Entity<MovedChild>,
+    }
+
+    impl Render for MovedRoot {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child(
+                div()
+                    .absolute()
+                    .left(self.origin.x)
+                    .top(self.origin.y)
+                    .w(self.width)
+                    .h(px(50.))
+                    .overflow_hidden()
+                    .child(
+                        self.child
+                            .clone()
+                            .cached(crate::StyleRefinement::default().size_full()),
+                    ),
+            )
+        }
+    }
+
+    /// The quads of the last frame, in paint order: bounds, content mask and color.
+    fn quads(window: &Window) -> Vec<(Bounds<ScaledPixels>, Bounds<ScaledPixels>, crate::Hsla)> {
+        window
+            .rendered_frame
+            .scene
+            .quads
+            .iter()
+            .map(|quad| (quad.bounds, quad.content_mask.bounds, quad.background.solid))
+            .collect()
+    }
+
+    #[gpui::test]
+    fn moved_cached_view_replays_its_frame_while_asked(cx: &mut TestAppContext) {
+        let presses = Rc::new(RefCell::new(Vec::new()));
+        let child = cx.new(|_| MovedChild {
+            renders: 0,
+            defer: false,
+            presses: presses.clone(),
+            target: Rc::new(Cell::new(Bounds::default())),
+        });
+        let window = cx.add_window(|_, _| MovedRoot {
+            origin: point(px(0.), px(10.)),
+            width: px(100.),
+            child: child.clone(),
+        });
+        let draw = |cx: &mut TestAppContext, update: &dyn Fn(&mut Window, &mut crate::App)| {
+            cx.update_window(window.into(), |_, window, cx| {
+                update(window, cx);
+                window.draw(cx).clear(cx);
+                quads(window)
+            })
+            .expect("draw window")
+        };
+        let move_to = |x: f32, width: f32, cx: &mut TestAppContext| {
+            window
+                .update(cx, |root, _, cx| {
+                    root.origin = point(px(x), px(10.));
+                    root.width = px(width);
+                    cx.notify();
+                })
+                .expect("update root");
+            draw(cx, &|_, _| {})
+        };
+        let renders = |cx: &mut TestAppContext| child.read_with(cx, |child, _| child.renders);
+        let first = move_to(0., 100., cx);
+        assert_eq!(renders(cx), 1);
+
+        // Without replay, a move renders the view again.
+        move_to(10., 100., cx);
+        assert_eq!(renders(cx), 2);
+
+        // With replay, a move of whole device pixels (at scale 2, 40.5 px is 81 device px from
+        // the first frame) paints the last frame moved, each quad and its clip, with no render.
+        draw(cx, &|window, _| window.set_replay_moved_views(true));
+        let replayed = move_to(40.5, 100., cx);
+        assert_eq!(renders(cx), 2);
+        let moved = |bounds: Bounds<ScaledPixels>| Bounds {
+            origin: point(bounds.origin.x + ScaledPixels(81.), bounds.origin.y),
+            size: bounds.size,
+        };
+        assert_eq!(
+            replayed,
+            first
+                .iter()
+                .map(|(bounds, mask, color)| (moved(*bounds), moved(*mask), *color))
+                .collect::<Vec<_>>()
+        );
+
+        // The target's hitbox moved, and a press at its new place reaches it, with the event and
+        // the pointer in the frame of reference of the bounds that it captured when it rendered,
+        // 30.5 px to the left.
+        let at = point(px(45.5), px(15.));
+        cx.update_window(window.into(), |_, window, cx| {
+            let targets = window
+                .rendered_frame
+                .hitboxes
+                .iter()
+                .filter(|hitbox| hitbox.size == size(px(20.), px(20.)))
+                .map(|hitbox| (hitbox.origin, hitbox.content_mask.bounds.origin))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                targets,
+                [(point(px(40.5), px(10.)), point(px(40.5), px(10.)))]
+            );
+            window.simulate_mouse_move(at, cx);
+            window.dispatch_event(
+                PlatformInput::MouseDown(MouseDownEvent {
+                    position: at,
+                    button: MouseButton::Left,
+                    modifiers: crate::Modifiers::default(),
+                    click_count: 1,
+                    first_mouse: false,
+                }),
+                cx,
+            );
+            assert_eq!(window.mouse_position(), at);
+        })
+        .unwrap();
+        let captured = Bounds::new(point(px(10.), px(10.)), size(px(20.), px(20.)));
+        assert_eq!(
+            presses.borrow().as_slice(),
+            &[(point(px(15.), px(15.)), point(px(15.), px(15.)), captured)]
+        );
+
+        // The press refreshes the window (GPUI's own click handling), which renders every view.
+        draw(cx, &|_, _| {});
+        assert_eq!(renders(cx), 3);
+
+        // A new size, and a clip that changes relative to the view (the window's left edge cuts
+        // it, then no longer does), each render it again.
+        move_to(41., 101., cx);
+        assert_eq!(renders(cx), 4);
+        move_to(-9.5, 101., cx);
+        assert_eq!(renders(cx), 5);
+        move_to(20.5, 101., cx);
+        assert_eq!(renders(cx), 6);
+
+        // Turning replay off renders each view that replayed at a moved origin, where it now
+        // stands, and the render draws what the replay drew.
+        let replayed = move_to(60.5, 101., cx);
+        assert_eq!(renders(cx), 6);
+        let rendered = draw(cx, &|window, _| window.set_replay_moved_views(false));
+        assert_eq!(renders(cx), 7);
+        assert_eq!(replayed, rendered);
+        assert_eq!(
+            child.read_with(cx, |child, _| child.target.get().origin),
+            point(px(60.5), px(10.))
+        );
+
+        // A view that deferred a draw, which paints under the window's clip, renders when it moves.
+        let deferring = child.clone();
+        draw(cx, &move |window, cx| {
+            window.set_replay_moved_views(true);
+            deferring.update(cx, |child, cx| {
+                child.defer = true;
+                cx.notify();
+            });
+        });
+        assert_eq!(renders(cx), 8);
+        move_to(70.5, 101., cx);
+        assert_eq!(renders(cx), 9);
     }
 }
 
