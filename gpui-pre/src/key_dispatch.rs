@@ -585,6 +585,18 @@ impl DispatchTree {
         focus_path
     }
 
+    /// The views on the path from the root to the element that tracks `focus_id`, or `None`
+    /// when no element tracks it.
+    pub fn focus_view_path(&self, focus_id: FocusId) -> Option<SmallVec<[EntityId; 8]>> {
+        let node = self.focusable_node_ids.get(&focus_id)?;
+        Some(
+            self.dispatch_path(*node)
+                .into_iter()
+                .filter_map(|node| self.nodes[node.0].view_id)
+                .collect(),
+        )
+    }
+
     pub fn view_path_reversed(&self, view_id: EntityId) -> impl Iterator<Item = EntityId> {
         let current_node_id = self.view_node_ids.get(&view_id).copied();
 

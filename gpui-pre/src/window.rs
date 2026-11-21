@@ -2754,16 +2754,41 @@ impl Window {
     }
 
     /// Move focus to the element associated with the given [`FocusHandle`].
+    ///
+    /// The next frame renders the views on the old and the new focus path of the last frame,
+    /// not the whole window. What an element draws from focus is its own handle's state
+    /// (`focus`, `focus_visible` and `in_focus` styles, `is_focused`, `contains_focused`,
+    /// `within_focused`, a list's focused item, the input handler, the reveal of a focused tab
+    /// stop), so it lies on one of those paths or inside the view that holds the focused element,
+    /// which renders the views nested in it. A view that draws state from a handle of an
+    /// element outside its own subtree must render on its own focus events. When the last frame
+    /// has no element for the old or the new handle, the whole window renders, as before.
     pub fn focus(&mut self, handle: &FocusHandle, cx: &mut App) {
         if !self.focus_enabled || self.focus == Some(handle.id) {
             return;
         }
 
-        self.focus = Some(handle.id);
+        let previous = self.focus.replace(handle.id);
         self.focus_generation = self.focus_generation.wrapping_add(1);
         self.clear_pending_keystrokes(cx);
 
-        self.refresh();
+        // A focus move during a draw renders nothing more, as `refresh` does.
+        if !self.invalidator.not_drawing() {
+            return;
+        }
+        let tree = &self.rendered_frame.dispatch_tree;
+        let paths = previous
+            .into_iter()
+            .chain([handle.id])
+            .map(|focus| tree.focus_view_path(focus))
+            .collect::<Option<Vec<_>>>();
+        match paths {
+            Some(paths) => {
+                self.dirty_views.extend(paths.into_iter().flatten());
+                self.invalidator.set_dirty(true);
+            }
+            None => self.refresh(),
+        }
     }
 
     /// Remove focus from all elements within this context's window.
@@ -11222,6 +11247,116 @@ mod tests {
         assert_eq!(renders(cx), 8);
         move_to(70.5, 101., cx);
         assert_eq!(renders(cx), 9);
+    }
+
+    /// A cached view with a focusable square: red, green while focused. `inner`, a cached view
+    /// inside the square, draws a square that is blue while the outer square holds focus.
+    struct Focusable {
+        renders: usize,
+        focus: FocusHandle,
+        inner: Option<crate::Entity<Focusable>>,
+    }
+
+    impl Render for Focusable {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            use crate::prelude::FluentBuilder as _;
+            self.renders += 1;
+            let square = div()
+                .track_focus(&self.focus)
+                .size(px(20.))
+                .bg(crate::rgb(0xff0000))
+                .focus(|style| style.bg(crate::rgb(0x00ff00)))
+                .in_focus(|style| style.bg(crate::rgb(0x0000ff)));
+            square.when_some(self.inner.clone(), |square, inner| {
+                square.child(inner.cached(crate::StyleRefinement::default().size(px(10.))))
+            })
+        }
+    }
+
+    struct Focusables {
+        views: Vec<crate::Entity<Focusable>>,
+    }
+
+    impl Render for Focusables {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().flex().children(self.views.iter().map(|view| {
+                view.clone()
+                    .cached(crate::StyleRefinement::default().size(px(30.)))
+            }))
+        }
+    }
+
+    #[gpui::test]
+    fn focus_renders_only_the_views_on_the_old_and_new_focus_paths(cx: &mut TestAppContext) {
+        let make = |inner, cx: &mut TestAppContext| {
+            cx.new(|cx| Focusable {
+                renders: 0,
+                focus: cx.focus_handle(),
+                inner,
+            })
+        };
+        let nested = make(None, cx);
+        let a = make(Some(nested.clone()), cx);
+        let b = make(None, cx);
+        let c = make(None, cx);
+        let views = [a.clone(), b.clone(), c.clone(), nested.clone()];
+        let window = cx.add_window(|_, _| Focusables {
+            views: vec![a.clone(), b.clone(), c.clone()],
+        });
+        // Each view's renders (a, b, c, nested), and each square's color in draw order (a, b, c,
+        // and nested over a).
+        let draw = |cx: &mut TestAppContext, focus: Option<FocusHandle>| {
+            cx.update_window(window.into(), |_, window, cx| {
+                if let Some(focus) = focus {
+                    window.focus(&focus, cx);
+                }
+                window.draw(cx).clear(cx);
+                let renders = views
+                    .iter()
+                    .map(|view| view.read(cx).renders)
+                    .collect::<Vec<_>>();
+                let colors = window
+                    .rendered_frame
+                    .scene
+                    .quads
+                    .iter()
+                    .map(|quad| crate::Rgba::from(quad.background.solid))
+                    .collect::<Vec<_>>();
+                (renders, colors)
+            })
+            .expect("draw window")
+        };
+        let (red, green, blue) = (
+            crate::rgb(0xff0000),
+            crate::rgb(0x00ff00),
+            crate::rgb(0x0000ff),
+        );
+        let handle = |view: &crate::Entity<Focusable>, cx: &mut TestAppContext| {
+            view.read_with(cx, |view, _| view.focus.clone())
+        };
+
+        assert_eq!(draw(cx, None), (vec![1, 1, 1, 1], vec![red, red, red, red]));
+
+        // Focus into a: a renders, and the view nested in it, inside the focused element, too.
+        let focus_a = handle(&a, cx);
+        assert_eq!(
+            draw(cx, Some(focus_a)),
+            (vec![2, 1, 1, 2], vec![green, red, red, blue])
+        );
+
+        // From a to b: both paths render, c does not.
+        let focus_b = handle(&b, cx);
+        assert_eq!(
+            draw(cx, Some(focus_b)),
+            (vec![3, 2, 1, 3], vec![red, green, red, red])
+        );
+
+        // A handle that no element of the last frame tracks: the whole window renders.
+        let elsewhere = cx.update(|cx| cx.focus_handle());
+        assert_eq!(
+            draw(cx, Some(elsewhere)),
+            (vec![4, 3, 2, 4], vec![red, red, red, red])
+        );
     }
 }
 
